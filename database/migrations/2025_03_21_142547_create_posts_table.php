@@ -14,13 +14,11 @@ return new class extends Migration
     {
         Schema::create('posts', function (Blueprint $table) {
             $table->id();
-            $table->uuid('posts_uuid'); 
-            $table->integer('transNo');
-            $table->uuid('posts_uuind')->unique(); // Defining UUID column and making it unique
-            $table->string('caption')->nullable();
-            $table->text('post')->nullable();
-            $table->tinyInteger('status')->default(1);
             $table->integer('code');
+            $table->uuid('posts_uuid')->unique(); 
+            $table->integer('transNo');
+            $table->string('caption')->nullable();
+            $table->tinyInteger('status')->default(1);
             $table->string('created_by')->nullable();
             $table->string('updated_by')->nullable();
             $table->timestamps();
