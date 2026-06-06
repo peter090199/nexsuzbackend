@@ -13,6 +13,8 @@ class UserPlan extends Model
 
     protected $fillable = [
         'planId',
+        'button_name',
+        'sort_number',
         'plan_name',
         'price',
         'tagmonthYear',
