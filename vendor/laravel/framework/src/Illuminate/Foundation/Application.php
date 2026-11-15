@@ -40,7 +40,7 @@ class Application extends Container implements ApplicationContract, CachesConfig
      *
      * @var string
      */
-    const VERSION = '10.48.29';
+    const VERSION = '10.50.4';
 
     /**
      * The base path for the Laravel installation.
@@ -261,12 +261,12 @@ class Application extends Container implements ApplicationContract, CachesConfig
 
         $this['events']->listen(
             'bootstrapping: *',
-            fn ($bootstrapper) => Cloud::bootstrapperBootstrapping($this, Str::after($bootstrapper, 'bootstrapping: '))
+            fn ($bootstrapper) => CloudBootstrapper::bootstrapping($this, Str::after($bootstrapper, 'bootstrapping: '))
         );
 
         $this['events']->listen(
             'bootstrapped: *',
-            fn ($bootstrapper) => Cloud::bootstrapperBootstrapped($this, Str::after($bootstrapper, 'bootstrapped: '))
+            fn ($bootstrapper) => CloudBootstrapper::bootstrapped($this, Str::after($bootstrapper, 'bootstrapped: '))
         );
     }
 
