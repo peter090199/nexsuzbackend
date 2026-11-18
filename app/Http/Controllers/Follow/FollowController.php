@@ -14,6 +14,7 @@ use App\Models\Userprofile;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\DB;
 use App\Helpers\SharedRoutine;
+use App\Helpers\PostVisibility;
 
 class FollowController extends Controller
 {
@@ -33,36 +34,80 @@ class FollowController extends Controller
         }
 
         // Check if the post exists in the database
-        $postExists = DB::table('posts')->where('id', $postId)->exists();
+        $post = DB::table('posts')->where('id', $postId)->first(['id', 'code', 'status']);
 
-        if (!$postExists) {
+        if (!$post) {
             return response()->json([
                 'success' => false,
                 'message' => 'Post not found in the database'
             ], 404);
         }
 
-        // Validate reaction
+        // privacy is enforced here, not only in the UI
+        if (!PostVisibility::canView($post->code, $post->status, $userCode)) {
+            return response()->json([
+                'success' => false,
+                'message' => "You can't react to this post."
+            ], 403);
+        }
+
+        // Validate reaction (only the reactions the UI offers)
         $request->validate([
-            'reaction' => 'required|string|max:50',
+            'reaction' => ['required', 'string', \Illuminate\Validation\Rule::in(\App\Helpers\ReactionSummary::ALLOWED)],
         ]);
 
-        // Insert or update reaction
-        DB::table('reactionPost')->updateOrInsert(
-            [
-                'post_id' => $postId,
-                'code'    => $userCode,
-            ],
-            [
+        // One reaction per user per post. The UNIQUE (post_id, code) index makes this atomic:
+        // a repeated click or a double submit changes the reaction, it can never create a second row.
+        DB::table('reactionPost')->upsert(
+            [[
+                'post_id'    => $postId,
+                'code'       => (string) $userCode,
                 'reaction'   => $reactionType,
-                'updated_at' => now(),
                 'create_at'  => now(),
-            ]
+                'updated_at' => now(),
+            ]],
+            ['post_id', 'code'],
+            ['reaction', 'updated_at']
         );
 
+        $summary = \App\Helpers\ReactionSummary::forPost((int) $postId, $userCode);
+
         return response()->json([
-            'success' => true,
-            'message' => 'Reaction saved successfully',
+            'success'     => true,
+            'message'     => 'Reaction saved successfully',
+            'my_reaction' => $summary['mine'],
+            'reactions'   => $summary,
+        ]);
+    }
+
+    /** Comments plus replies on a post, the number shown next to the comment button. */
+    private function commentTotal(string $postUuid): int
+    {
+        $comments = DB::table('commentposts')->where('post_uuidOrUind', $postUuid);
+        $replies = DB::table('commentreplies')->whereIn('comment_uuid', (clone $comments)->select('comment_uuid'))->count();
+
+        return (int) $comments->count() + (int) $replies;
+    }
+
+    // Remove the current user's reaction ("unlike")
+    public function removeReactionByPostId(Request $request)
+    {
+        $request->validate(['post_id' => 'required|integer']);
+
+        $removed = DB::table('reactionPost')
+            ->where('post_id', $request->post_id)
+            ->where('code', Auth::user()->code)
+            ->delete();
+
+        $summary = PostVisibility::canViewPostId($request->post_id, Auth::user()->code)
+            ? \App\Helpers\ReactionSummary::forPost((int) $request->post_id, Auth::user()->code)
+            : ['total' => 0, 'breakdown' => [], 'mine' => null];
+
+        return response()->json([
+            'success'     => true,
+            'message'     => $removed ? 'Reaction removed.' : 'There was no reaction to remove.',
+            'my_reaction' => $summary['mine'],
+            'reactions'   => $summary,
         ]);
     }
 
@@ -72,12 +117,15 @@ class FollowController extends Controller
         $userCode = Auth::user()->code;
 
         // Check if the post exists
-        $postExists = DB::table('posts')->where('id', $id)->exists();
-        if (!$postExists) {
+        $post = DB::table('posts')->where('id', $id)->first(['id', 'code', 'status']);
+        if (!$post) {
             return response()->json([
                 'success' => false,
                 'message' => 'Post not found'
             ], 404);
+        }
+        if (!PostVisibility::canView($post->code, $post->status, $userCode)) {
+            return response()->json(['success' => false, 'message' => "You can't access this post."], 403);
         }
 
         // Get the user's reaction for the post
@@ -103,9 +151,10 @@ class FollowController extends Controller
         // Build base query
         $query = '
             SELECT 
-                (SELECT getUserprofilepic(p.code)) AS profile_pic,
-                (SELECT getFullname(p.code)) AS fullname,
+                (SELECT up.photo_pic FROM userprofiles AS up WHERE up.code = p.code LIMIT 1) AS profile_pic,
+                (SELECT u.fullname FROM users AS u WHERE u.code = p.code LIMIT 1) AS fullname,
                 p.id,
+                p.transNo,
                 p.posts_uuid,
                 p.caption,
                 p.status,
@@ -117,8 +166,8 @@ class FollowController extends Controller
                 ON f1.following_code = p.code AND f1.follower_code = ? AND f1.follow_status = "accepted"
             LEFT JOIN follows AS f2 
                 ON f2.follower_code = p.code AND f2.following_code = ? AND f2.follow_status = "accepted"
-            WHERE p.status = 1
-            AND (
+            WHERE p.status IN (1, 2)
+                AND (
                 f1.follower_code IS NOT NULL
                 OR f2.following_code IS NOT NULL
                 OR p.code = ?
@@ -149,19 +198,24 @@ class FollowController extends Controller
         foreach ($data as $post) {
             $attachments = DB::table('attachmentposts')
                 ->where('posts_uuid', $post->posts_uuid)
-                ->where(function ($q) use ($currentUserCode) {
-                    $q->where('status', 1)
-                        ->orWhere('code', $currentUserCode);
-                })
                 ->get();
+            \App\Helpers\MediaUrl::normalizeAll($attachments);
 
             $images = $attachments->where('posts_type', 'image')->values();
             $videos = $attachments->where('posts_type', 'video')->values();
 
             $result[] = [
                 'id' => $post->id,
+                'transNo' => $post->transNo,
                 'profile_pic' => $post->profile_pic,
                 'fullname' => $post->fullname,
+                'is_owner' => (string) $post->post_owner === (string) $currentUserCode,
+                'my_reaction' => DB::table('reactionPost')
+                    ->where('post_id', $post->id)
+                    ->where('code', $currentUserCode)
+                    ->value('reaction'),
+                'reaction_summary' => \App\Helpers\ReactionSummary::forPost((int) $post->id, $currentUserCode),
+                'comments_count' => $this->commentTotal($post->posts_uuid),
                 'posts_uuid' => $post->posts_uuid,
                 'caption' => $post->caption,
                 'status' => $post->status,
@@ -185,8 +239,8 @@ class FollowController extends Controller
 
         $data = DB::select('
                 SELECT 
-                    (SELECT getUserprofilepic(p.code)) AS profile_pic,
-                    (SELECT getFullname(p.code)) AS fullname,
+                    (SELECT up.photo_pic FROM userprofiles AS up WHERE up.code = p.code LIMIT 1) AS profile_pic,
+                    (SELECT u.fullname FROM users AS u WHERE u.code = p.code LIMIT 1) AS fullname,
                     p.posts_uuid,
                     p.caption,
                     p.status,
@@ -198,8 +252,8 @@ class FollowController extends Controller
                     ON f1.following_code = p.code AND f1.follower_code = ? AND f1.follow_status = "accepted"
                 LEFT JOIN follows AS f2 
                     ON f2.follower_code = p.code AND f2.following_code = ? AND f2.follow_status = "accepted"
-                WHERE p.status = 1
-                AND (
+                WHERE p.status IN (1, 2)
+                    AND (
                     f1.follower_code IS NOT NULL
                     OR f2.following_code IS NOT NULL
                     OR p.code = ?
@@ -211,10 +265,10 @@ class FollowController extends Controller
 
         foreach ($data as $post) {
             $attachments = DB::select('
-                    SELECT * FROM attachmentposts 
+                    SELECT * FROM attachmentposts
                     WHERE posts_uuid = ?
-                    AND (status = 1 OR ? = (SELECT code FROM posts WHERE posts_uuid = ?))
-                ', [$post->posts_uuid, $currentUserCode, $post->posts_uuid]);
+                ', [$post->posts_uuid]);
+            \App\Helpers\MediaUrl::normalizeAll($attachments);
 
             $result[] = [
                 "profile_pic" => $post->profile_pic,
@@ -263,12 +317,12 @@ class FollowController extends Controller
                     ON f2.follower_code = p.code 
                     AND f2.following_code = ? 
                     AND f2.follow_status = 'accepted'
-                WHERE p.status = 1
-                AND (
+                WHERE p.status IN (1, 2)
+                    AND (
                     f1.follower_code IS NOT NULL
                     OR f2.following_code IS NOT NULL
                     OR p.code = ?
-                    OR u.role_code = 'DEF-MASTERADMIN' 
+                    OR (p.status = 1 AND u.role_code = 'DEF-MASTERADMIN') 
                 )
                 ORDER BY p.created_at DESC
             ", [$currentUserCode, $currentUserCode, $currentUserCode]);
@@ -279,10 +333,6 @@ class FollowController extends Controller
 
             $attachments = DB::table('attachmentposts')
                 ->where('posts_uuid', $post->posts_uuid)
-                ->where(function ($query) use ($currentUserCode) {
-                    $query->where('status', 1)
-                        ->orWhere('code', $currentUserCode);
-                })
                 ->get();
 
             $images = $attachments->where('posts_type', 'image')->values();

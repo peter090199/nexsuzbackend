@@ -102,6 +102,10 @@
         Route::get('user/profile', [ProfileController::class, 'userAuth'])->name('user/profile');
         Route::resource('profile_pic', ProfilepictureController::class)->names('profile_pic');
         Route::post('uploadCoverPhoto', [ProfileController::class, 'uploadCoverPhoto']);
+        Route::post('removeCoverPhoto', [ProfileController::class, 'removeCoverPhoto']);
+        Route::post('uploadProfilePhoto', [ProfileController::class, 'uploadProfilePhoto']);
+        Route::post('removeProfilePhoto', [ProfileController::class, 'removeProfilePhoto']);
+        Route::get('media', [ProfileController::class, 'media']);
         //users
         Route::get('getUsers', [AppUsersController::class, 'getUsers']);
 
@@ -134,6 +138,14 @@
         //chat meesages realtime
         Route::post('send-message', [ChatController::class, 'sendMessage']);
         Route::post('messages/read', [ChatController::class, 'markAsRead']);
+        Route::get('conversations', [ChatController::class, 'conversations']);
+
+        // notification preferences + social activity notifications (always the caller's own)
+        Route::get('notification-settings', [\App\Http\Controllers\NotificationSettingsController::class, 'show']);
+        Route::put('notification-settings', [\App\Http\Controllers\NotificationSettingsController::class, 'update']);
+        Route::post('notification-settings/reset', [\App\Http\Controllers\NotificationSettingsController::class, 'reset']);
+        Route::get('activity-notifications', [\App\Http\Controllers\ActivityNotificationController::class, 'index']);
+        Route::post('activity-notifications/read', [\App\Http\Controllers\ActivityNotificationController::class, 'markRead']);
         Route::get('receivemessages/{receiverId}', [ChatController::class, 'fetchMessages']);
         Route::get('getActiveUsers', [ChatController::class, 'getActiveUsers']);
         Route::put('messagesIsread', [ChatController::class, 'markAsReadMessage']);
@@ -154,11 +166,15 @@
         Route::resource('post', PostController::class)->names('post');
         Route::post('deleteindidualpost/{id}', [PostController::class, 'deleteIndividualPost']);
         Route::post('reactToPostById', [FollowController::class, 'reactToPostById']);
+        Route::post('removeReactionByPostId', [FollowController::class, 'removeReactionByPostId']);
         Route::get('getReactionByPostId/{id}', [FollowController::class, 'getReactionByPostId']);
 
         //Comment
         Route::resource('comment', CommentController::class)->names('comment');
         Route::post('commentreply', [CommentController::class, 'commentreply']);
+        Route::post('reactToComment', [CommentController::class, 'reactToComment']);
+        Route::post('removeCommentReaction', [CommentController::class, 'removeCommentReaction']);
+        Route::get('commentReactors', [CommentController::class, 'commentReactors']);
 
         //Reactions  
         Route::resource('reaction', App\Http\Controllers\Postreaction\PostreactionController::class)->names('reaction');

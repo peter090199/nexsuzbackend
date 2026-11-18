@@ -8,6 +8,8 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Validator;
+use App\Helpers\MediaUrl;
+use App\Helpers\PostVisibility;
 use App\Models\Post;
 use App\Models\Attachmentpost;
 use App\Models\Resource;
@@ -22,6 +24,14 @@ class PostController extends Controller
      * Display a listing of the resource.
      */
     //test
+    private function commentTotal(string $postUuid): int
+    {
+        $comments = DB::table('commentposts')->where('post_uuidOrUind', $postUuid);
+        $replies = DB::table('commentreplies')->whereIn('comment_uuid', (clone $comments)->select('comment_uuid'))->count();
+
+        return (int) $comments->count() + (int) $replies;
+    }
+
     public function index(Request $request)
     {
         if (Auth::check()) {
@@ -39,21 +49,22 @@ class PostController extends Controller
                         $posts = Post::where('code', $authCode)->get();
                     } else {
                         // Show only public posts
-                        $posts = Post::where('status', 1)
-                            ->where('code', $requestedCode)
-                            ->get();
+                        $posts = PostVisibility::limit(Post::where('code', $requestedCode), $requestedCode, $authCode)->get();
                     }
 
                     $commentController = new CommentController();
+
+                    // The author is the profile owner, not whoever is looking at the page
+                    $authorName = DB::table('users')->where('code', $requestedCode)->value('fullname')
+                        ?: DB::table('resources')->where('code', $requestedCode)->value('fullname')
+                        ?: $fullname;
+                    $authorPhoto = DB::table('userprofiles')->where('code', $requestedCode)->value('photo_pic');
 
                     foreach ($posts as $post) {
                         // Fetch attachments
                         $attachmentQuery = Attachmentpost::where('posts_uuid', $post->posts_uuid);
 
-                        if ($authCode != $requestedCode) {
-                            // If viewing someone else's posts, only show public attachments
-                            $attachmentQuery->where('status', 1);
-                        }
+                        
 
                         $attachments = $attachmentQuery->get();
 
@@ -67,10 +78,10 @@ class PostController extends Controller
                         $commentData = json_decode($commentResponse->getContent());
 
                         $result[] = [
-                            "profile_pic" => $post->profile_pic,
+                            "profile_pic" => $post->profile_pic ?: $authorPhoto,
                             "id"=>$post->id,
                             "transNo"=>$post->transNo,
-                            "fullname" => $fullname,
+                            "fullname" => $authorName,
                             "posts_uuid" => $post->posts_uuid,
                             "caption" => $post->caption,
                             "status" => $post->status,
@@ -78,7 +89,13 @@ class PostController extends Controller
                             "updated_at" => $post->updated_at,
                             "images" => $images,
                             "videos" => $videos,
-                            "comments" => $commentData
+                            "comments" => $commentData,
+                            // comments + replies, the same number the Home feed shows
+                            "comments_count" => $this->commentTotal($post->posts_uuid),
+                            // reactions: totals, breakdown and what the viewer picked (one per user per post)
+                            "reaction_summary" => \App\Helpers\ReactionSummary::forPost((int) $post->id, $authCode),
+                            "my_reaction" => \App\Helpers\ReactionSummary::forPost((int) $post->id, $authCode)['mine'],
+                            "is_owner" => (string) $post->code === (string) $authCode
                         ];
                     }
                 }
@@ -114,9 +131,7 @@ class PostController extends Controller
                         $posts = Post::where('code', $authCode)->get();
                     } else {
                         // Show only public posts
-                        $posts = Post::where('status', 1)
-                            ->where('code', $requestedCode)
-                            ->get();
+                        $posts = PostVisibility::limit(Post::where('code', $requestedCode), $requestedCode, $authCode)->get();
                     }
 
                     $commentController = new CommentController();
@@ -125,10 +140,7 @@ class PostController extends Controller
                         // Conditional attachments based on access
                         $attachmentQuery = Attachmentpost::where('posts_uuid', $post->posts_uuid);
 
-                        if ($authCode != $requestedCode) {
-                            // If viewing someone else's posts, only show public attachments
-                            $attachmentQuery->where('status', 1);
-                        }
+                        
 
                         $attachments = $attachmentQuery->get();
 
@@ -163,77 +175,117 @@ class PostController extends Controller
     }
 
 
+    /**
+     * Edit a post (text, privacy, images, video).
+     *
+     *  - only the owner may edit (403 otherwise)
+     *  - new images are ADDED; existing ones are kept unless listed in remove_attachments[]
+     *    (posts_uuind values of THIS post; ids of other posts are ignored)
+     *  - a new video replaces the current one
+     *  - physical files are deleted only after the database change commits, and only when no
+     *    other attachment row still references the same file
+     *  - id, author, created_at, reactions and comments are never touched
+     */
     public function updatePostByTransNo(Request $request, $transNo)
     {
         $data = $request->all();
 
         $validator = Validator::make($data, [
-            'caption' => 'nullable|string',
-            'status'  => 'required|integer', // status is required
-            'posts.*' => 'nullable|file|mimes:jpeg,png,jpg,gif|max:3000',
-            'video'   => 'nullable|mimetypes:video/mp4|max:50000',
-        ]);
+            'caption'              => 'nullable|string|max:5000',
+            'status'               => 'required|integer|in:0,1,2',
+            'posts'                => 'nullable|array|max:10',
+            'posts.*'              => 'nullable|file|mimes:jpeg,png,jpg,gif,webp|max:3000',
+            'video'                => 'nullable|mimetypes:video/mp4|max:50000',
+            'remove_attachments'   => 'nullable|array|max:50',
+            'remove_attachments.*' => 'string|max:64',
+        ], $this->mediaValidationMessages());
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return $this->validationFailed($validator);
         }
+
+        $user = Auth::user();
+
+        // ---------- AUTHORISATION (enforced here, not only in the client) ----------
+        $post = Post::where('transNo', $transNo)->first();
+
+        if (!$post) {
+            return response()->json(['success' => false, 'message' => 'Post not found.'], 404);
+        }
+        if ((string) $post->code !== (string) $user->code) {
+            return response()->json(['success' => false, 'message' => 'You can only edit your own posts.'], 403);
+        }
+
+        $codeuser   = $user->code;
+        $fullname   = $user->fullname;
+        $folderuuid = $post->posts_uuid;
+        $stored     = [];   // files written during this request (cleaned up if the save fails)
 
         try {
             DB::beginTransaction();
 
-            $codeuser = Auth::user()->code;
-            $fullname = Auth::user()->fullname;
+            // ---------- which attachments are being detached (this post only) ----------
+            $removeIds = array_values(array_unique($data['remove_attachments'] ?? []));
+            $toRemove = $removeIds
+                ? DB::table('attachmentposts')->where('posts_uuid', $folderuuid)->whereIn('posts_uuind', $removeIds)->get()
+                : collect();
 
-            // ---------- FIND EXISTING POST ----------
-            $post = Post::where('transNo', $transNo)
-                ->where('code', $codeuser)
-                ->first();
+            // a new video replaces the current one
+            if ($request->hasFile('video')) {
+                $toRemove = $toRemove->concat(
+                    DB::table('attachmentposts')->where('posts_uuid', $folderuuid)->where('posts_type', 'video')->get()
+                )->unique('id')->values();
+            }
+            $removeRowIds = $toRemove->pluck('id')->all();
 
-            if (!$post) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Post not found or not owned by user.'
-                ], 404);
+            // ---------- limits and "must still have content" ----------
+            $keptImages = DB::table('attachmentposts')
+                ->where('posts_uuid', $folderuuid)->where('posts_type', 'image')
+                ->whereNotIn('id', $removeRowIds)->count();
+            $newImages = count($request->file('posts') ?? []);
+
+            if ($keptImages + $newImages > 10) {
+                DB::rollBack();
+                return response()->json(['success' => false, 'message' => 'You can attach up to 10 images per post.'], 422);
             }
 
-            $folderuuid = $post->posts_uuid;
+            $keptAny = DB::table('attachmentposts')->where('posts_uuid', $folderuuid)->whereNotIn('id', $removeRowIds)->count();
+            $caption = $request->exists('caption') ? trim((string) $request->input('caption')) : (string) $post->caption;
 
-            // ---------- DELETE OLD ATTACHMENTS ----------
-            $attachments = DB::table('attachmentposts')
-                ->where('posts_uuid', $folderuuid)
-                ->get();
-
-            foreach ($attachments as $a) {
-                $path = str_replace(asset('storage') . '/', '', $a->path_url);
-                Storage::disk('public')->delete($path);
+            if ($caption === '' && $keptAny === 0 && !$request->hasFile('posts') && !$request->hasFile('video')) {
+                DB::rollBack();
+                return response()->json(['success' => false, 'message' => 'A post needs some text, an image or a video.'], 422);
             }
 
-            DB::table('attachmentposts')
-                ->where('posts_uuid', $folderuuid)
-                ->delete();
-
-            // ---------- UPDATE POST ----------
+            // ---------- UPDATE THE POST (id, author and created_at stay as they are) ----------
             $post->update([
-                'caption'    => $data['caption'] ?? $post->caption,
+                'caption'    => $caption === '' ? null : $caption,
                 'status'     => $data['status'],
                 'updated_by' => $fullname,
                 'updated_at' => now(),
             ]);
 
-            // ---------- UPLOAD NEW IMAGES ----------
+            // detach removed attachments
+            if ($removeRowIds) {
+                DB::table('attachmentposts')->whereIn('id', $removeRowIds)->delete();
+            }
+
+            // keep each attachment's visibility in step with the post
+            DB::table('attachmentposts')->where('posts_uuid', $folderuuid)->update(['status' => $data['status']]);
+
+            // ---------- ADD NEW IMAGES ----------
             if ($request->hasFile('posts')) {
                 foreach ($request->file('posts') as $file) {
-                    $uuid = Str::uuid();
-                    $filename = time() . '_' . $file->getClientOriginalName();
-                    $file->storeAs("uploads/posts/{$codeuser}/{$folderuuid}", $filename, 'public');
+                    [$relative, $url] = $this->storeMedia($file, $codeuser, $folderuuid);
+                    $stored[] = $relative;
 
                     DB::table('attachmentposts')->insert([
                         'code'        => $codeuser,
-                        'transNo'     => $transNo,
+                        'transNo'     => $post->transNo,
                         'posts_uuid'  => $folderuuid,
-                        'posts_uuind' => $uuid,
+                        'posts_uuind' => (string) Str::uuid(),
                         'status'      => $data['status'],
-                        'path_url'    => asset("storage/app/public/uploads/posts/{$codeuser}/{$folderuuid}/{$filename}"),
+                        'path_url'    => $url,
                         'posts_type'  => 'image',
                         'created_by'  => $fullname,
                         'created_at'  => now(),
@@ -241,20 +293,18 @@ class PostController extends Controller
                 }
             }
 
-            // ---------- UPLOAD NEW VIDEO ----------
+            // ---------- ADD NEW VIDEO ----------
             if ($request->hasFile('video')) {
-                $video = $request->file('video');
-                $uuid = Str::uuid();
-                $filename = time() . '_' . $video->getClientOriginalName();
-                $video->storeAs("uploads/posts/{$codeuser}/{$folderuuid}", $filename, 'public');
+                [$relative, $url] = $this->storeMedia($request->file('video'), $codeuser, $folderuuid);
+                $stored[] = $relative;
 
                 DB::table('attachmentposts')->insert([
                     'code'        => $codeuser,
-                    'transNo'     => $transNo,
+                    'transNo'     => $post->transNo,
                     'posts_uuid'  => $folderuuid,
-                    'posts_uuind' => $uuid,
+                    'posts_uuind' => (string) Str::uuid(),
                     'status'      => $data['status'],
-                    'path_url'    => asset("storage/app/public/uploads/posts/{$codeuser}/{$folderuuid}/{$filename}"),
+                    'path_url'    => $url,
                     'posts_type'  => 'video',
                     'created_by'  => $fullname,
                     'created_at'  => now(),
@@ -262,20 +312,88 @@ class PostController extends Controller
             }
 
             DB::commit();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Post updated successfully.',
-                'transNo' => $transNo,
-            ]);
-
         } catch (\Throwable $th) {
             DB::rollBack();
+            foreach ($stored as $relative) {
+                Storage::disk('public')->delete($relative);   // do not leave orphan uploads behind
+            }
+            report($th);
+
             return response()->json([
                 'success' => false,
-                'message' => 'Error: ' . $th->getMessage(),
-            ]);
+                'message' => 'The post could not be updated. Please try again.',
+            ], 500);
         }
+
+        // ---------- delete physical files only now, and only if nothing else uses them ----------
+        foreach ($toRemove as $a) {
+            $relative = MediaUrl::relativePath($a->path_url);
+            if ($relative && !DB::table('attachmentposts')->where('path_url', 'like', '%' . $relative)->exists()) {
+                Storage::disk('public')->delete($relative);
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Post updated successfully.',
+            'transNo' => $post->transNo,
+            'post'    => $this->postPayload($post->fresh()),
+        ]);
+    }
+
+    /** The edited post in the same shape the home feed uses, so the client can swap it in place. */
+    private function postPayload(Post $post): array
+    {
+        $attachments = Attachmentpost::where('posts_uuid', $post->posts_uuid)->orderBy('id')->get();
+
+        return [
+            'id'         => $post->id,
+            'transNo'    => $post->transNo,
+            'posts_uuid' => $post->posts_uuid,
+            'caption'    => $post->caption,
+            'status'     => $post->status,
+            'created_at' => $post->created_at,
+            'updated_at' => $post->updated_at,
+            'images'     => $attachments->where('posts_type', 'image')->values(),
+            'videos'     => $attachments->where('posts_type', 'video')->values(),
+        ];
+    }
+
+    /**
+     * Store an uploaded file on the public disk under a random, server-generated
+     * name (the client's filename is never used) and return [relativePath, url].
+     */
+    private function storeMedia($file, $codeuser, $folderuuid): array
+    {
+        $ext = strtolower($file->guessExtension() ?: $file->getClientOriginalExtension());
+        $dir = "uploads/posts/{$codeuser}/{$folderuuid}";
+        $filename = Str::uuid() . '.' . $ext;
+        $file->storeAs($dir, $filename, 'public');
+
+        return ["{$dir}/{$filename}", url("storage/{$dir}/{$filename}")];
+    }
+
+    private function mediaValidationMessages(): array
+    {
+        return [
+            'posts.max'       => 'You can attach up to 10 images per post.',
+            'posts.*.file'    => 'Each attachment must be a valid file.',
+            'posts.*.mimes'   => 'Images must be JPG, PNG, GIF or WEBP.',
+            'posts.*.uploaded' => 'An image could not be uploaded. It may be larger than the server allows.',
+            'posts.*.max'     => 'Each image must be 3 MB or smaller.',
+            'video.mimetypes' => 'Video must be an MP4 file.',
+            'video.max'       => 'Video must be 50 MB or smaller.',
+            'caption.max'     => 'Post text can be up to 5000 characters.',
+        ];
+    }
+
+    private function validationFailed($validator)
+    {
+        return response()->json([
+            'success' => false,
+            'message' => $validator->errors()->first(),
+            'errors'  => $validator->errors(),
+        ], 422);
     }
 
     public function savePost(Request $request)
@@ -283,14 +401,20 @@ class PostController extends Controller
         $data = $request->all();
 
         $validator = Validator::make($data, [
-            'posts.*' => 'file|mimes:jpeg,png,jpg,gif|max:3000', // only images here
-            'caption' => 'nullable|string',
-            'status'  => 'required|integer',
-            'video'   => 'nullable|mimetypes:video/mp4|max:50000' // separate video
-        ]);
+            'posts'     => 'nullable|array|max:10',
+            'posts.*'   => 'file|mimes:jpeg,png,jpg,gif,webp|max:3000', // only images here
+            'caption'   => 'nullable|string|max:5000',
+            'status'    => 'required|integer|in:0,1,2',
+            'video'     => 'nullable|mimetypes:video/mp4|max:50000' // separate video
+        ], $this->mediaValidationMessages());
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return $this->validationFailed($validator);
+        }
+
+        // a post needs some content: text, an image or a video
+        if (!trim((string) ($data['caption'] ?? '')) && !$request->hasFile('posts') && !$request->hasFile('video')) {
+            return response()->json(['success' => false, 'message' => 'Write something or attach an image or video.'], 422);
         }
 
         try {
@@ -316,12 +440,8 @@ class PostController extends Controller
             // Save image files
             if ($request->hasFile('posts')) {
                 foreach ($request->file('posts') as $file) {
-                    $uuid     = Str::uuid();
-                    $filename = time() . '_' . $file->getClientOriginalName();
-                    $filePath = "app/public/uploads/posts/{$codeuser}/{$folderuuid}/{$filename}";
-
-                    // Store file
-                    $file->storeAs("uploads/posts/{$codeuser}/{$folderuuid}", $filename, 'public');
+                    $uuid = Str::uuid();
+                    [$relative, $url] = $this->storeMedia($file, $codeuser, $folderuuid);
 
                     DB::table('attachmentposts')->insert([
                         'code'        => $codeuser,
@@ -329,7 +449,7 @@ class PostController extends Controller
                         'posts_uuid'  => $folderuuid,
                         'posts_uuind' => $uuid,
                         'status'      => $data['status'],
-                        'path_url'    => asset("storage/{$filePath}"), // consistent URL
+                        'path_url'    => $url,
                         'posts_type'  => 'image',
                         'created_by'  => Auth::user()->fullname,
                     ]);
@@ -338,12 +458,8 @@ class PostController extends Controller
             // Save video file
             if ($request->hasFile('video')) {
                 $video    = $request->file('video');
-                $uuid     = Str::uuid();
-                $filename = time() . '_' . $video->getClientOriginalName();
-                $videoPath = "app/public/uploads/posts/{$codeuser}/{$folderuuid}/{$filename}";
-
-                // Store video
-                $video->storeAs("uploads/posts/{$codeuser}/{$folderuuid}", $filename, 'public');
+                $uuid = Str::uuid();
+                [$relative, $url] = $this->storeMedia($video, $codeuser, $folderuuid);
 
                 DB::table('attachmentposts')->insert([
                     'code'        => $codeuser,
@@ -351,20 +467,28 @@ class PostController extends Controller
                     'posts_uuid'  => $folderuuid,
                     'posts_uuind' => $uuid,
                     'status'      => $data['status'],
-                    'path_url'    => asset("storage/{$videoPath}"),
+                    'path_url'    => $url,
                     'posts_type'  => 'video',
                     'created_by'  => Auth::user()->fullname,
                 ]);
             }
 
             DB::commit(); // Commit transaction
-            event(new \App\Events\NewPostCreated([
-                'transNo' => $newtrans,
-                'code' => $codeuser,
-                'caption' => $data['caption'] ?? '',
-                'created_by' => Auth::user()->fullname,
-                'created_at' => now(),
-            ]));
+
+            // Live-update broadcast is best effort: the post is already saved, so an
+            // unreachable Pusher (offline, bad certificate...) must not fail the request
+            // (the user would otherwise retry and create a duplicate post).
+            try {
+                event(new \App\Events\NewPostCreated([
+                    'transNo' => $newtrans,
+                    'code' => $codeuser,
+                    'caption' => $data['caption'] ?? '',
+                    'created_by' => Auth::user()->fullname,
+                    'created_at' => now(),
+                ]));
+            } catch (\Throwable $e) {
+                \Log::warning('NewPostCreated broadcast failed: ' . $e->getMessage());
+            }
 
 
             return response()->json([
@@ -388,7 +512,7 @@ class PostController extends Controller
         $validator = Validator::make($data, [
             'posts.*' => 'file|mimes:jpeg,png,jpg,gif,mp4,avi,mov|max:3000', // Validate multiple files
             'caption' => 'nullable|string',
-            'status' => 'required|integer',
+            'status' => 'required|integer|in:0,1,2',
         ]);
 
         if ($validator->fails()) {
@@ -438,7 +562,7 @@ class PostController extends Controller
                         'posts_uuid' => $folderuuid,
                         'posts_uuind' => $uuid,
                         'status' => $data['status'],
-                        'path_url' => 'https://exploredition.com/storage/app/public/uploads/posts/' . Auth::user()->code . '/' . $folderuuid . '/' . $filename,
+                        'path_url' => url('storage/uploads/posts/' . Auth::user()->code . '/' . $folderuuid . '/' . $filename),
                         'posts_type' => $postType,
                         'created_by' => Auth::user()->fullname,
                     ]);
@@ -503,10 +627,8 @@ class PostController extends Controller
                                 ->get();
                         } else {
                             // Show only public posts
-                            $posts = Post::where('status', 1)
-                                ->where('code', $requestedCode)
-                                ->where('posts_uuid', $id)
-                                ->get();
+                            $posts = PostVisibility::limit(Post::where('code', $requestedCode), $requestedCode, $authCode)
+                                ->where('posts_uuid', $id)->get();
                         }
 
                         // Loop through posts and add attachments to result
@@ -517,9 +639,7 @@ class PostController extends Controller
                                 $attachments = Attachmentpost::where('posts_uuid', $post->posts_uuid)->get();
                             } else {
                                 // Show only public attachments
-                                $attachments = Attachmentpost::where('posts_uuid', $post->posts_uuid)
-                                    ->where('status', 1)
-                                    ->get();
+                                $attachments = Attachmentpost::where('posts_uuid', $post->posts_uuid)->get();
                             }
 
                             $profilePic = Userprofile::select('photo_pic')->where('code', $requestedCode)->first();
@@ -573,7 +693,7 @@ class PostController extends Controller
         $validator = Validator::make($data, [
             'posts.*' => 'file|mimes:jpeg,png,jpg,gif,mp4,avi,mov|max:3000', // Validate multiple files
             'caption' => 'nullable|string',
-            'status' => 'required|integer',
+            'status' => 'required|integer|in:0,1,2',
         ]);
 
         if ($validator->fails()) {
@@ -632,7 +752,7 @@ class PostController extends Controller
                         'posts_uuid' => $folderuuid,
                         'posts_uuind' => $uuid,
                         'status' => $data['status'],
-                        'path_url' => 'https://exploredition.com/storage/app/public/uploads/posts/' . Auth::user()->code . '/' . $folderuuid . '/' . $filename,
+                        'path_url' => url('storage/uploads/posts/' . Auth::user()->code . '/' . $folderuuid . '/' . $filename),
                         'created_by' => Auth::user()->fullname,
                     ]);
 
@@ -720,11 +840,13 @@ class PostController extends Controller
 
                 if (count($countAttach) > 0) {
                     $Attachment = Attachmentpost::where('posts_uuind', $id)->where('code', Auth::user()->code)->first();
-                    $folderPath = "uploads/posts/$Attachment->code/$Attachment->posts_uuid/$Attachment->posts_uuind";
+                    $relative = MediaUrl::relativePath($Attachment->path_url);
 
                     Attachmentpost::where('posts_uuind', $id)->where('code', Auth::user()->code)->delete();
-                    // Delete the entire folder and its contents
-                    Storage::disk('public')->deleteDirectory($folderPath);
+                    // remove the stored file itself
+                    if ($relative) {
+                        Storage::disk('public')->delete($relative);
+                    }
                     DB::commit();
                     return response()->json(['success' => true, 'message' => 'Post and its attachments were successfully deleted.',], 200);
                 }
@@ -762,12 +884,7 @@ class PostController extends Controller
 
             $posts = DB::table('posts')
                 ->where('code', $requestedCode ?: $authCode)
-                ->where(function ($query) use ($requestedCode, $authCode) {
-                    $query->where('status', 1);
-                    if (!$requestedCode || $requestedCode == $authCode) {
-                        $query->orWhere('status', 0);
-                    }
-                })
+                ->whereIn('status', PostVisibility::statusesFor($requestedCode ?: $authCode, $authCode))
                 ->get();
 
             $result = [];

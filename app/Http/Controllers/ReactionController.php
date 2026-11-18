@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Helpers\PostVisibility;
 use App\Http\Controllers\Controller;
 use App\Models\Reaction;
 use Illuminate\Http\Request;
@@ -24,10 +25,14 @@ class ReactionController extends Controller
             $user = Auth::user();
 
             $validated = $request->validate([
-              'post_id' => 'required|integer', 
+              'post_id' => 'required|integer',
               'post_uuidOrUind' => 'required|string|max:100',
               'reaction' => 'nullable|string|max:255',
             ]);
+
+            if (!PostVisibility::canViewPostId($validated['post_id'], $user->code)) {
+                return response()->json(['success' => false, 'message' => "You can't react to this post."], 403);
+            }
 
             DB::beginTransaction();
 
@@ -68,6 +73,9 @@ class ReactionController extends Controller
 
     public function getReactionPost(string $post_id)
     {
+        if (!PostVisibility::canViewPostId($post_id, \Illuminate\Support\Facades\Auth::user()?->code) && \Illuminate\Support\Facades\DB::table('posts')->where('id', $post_id)->exists()) {
+            return response()->json(['success' => false, 'message' => "You can't access this post."], 403);
+        }
         $data = DB::select('
             SELECT 
                 r.code,

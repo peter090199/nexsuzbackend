@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Postreaction;
 
+use App\Helpers\PostVisibility;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\CommentPost;
@@ -16,6 +17,9 @@ class PostreactionController extends Controller
 {
     public function show(string $id)
     {
+        if (!PostVisibility::canViewUuid($id, \Illuminate\Support\Facades\Auth::user()?->code)) {
+            return response()->json(['success' => false, 'message' => "You can't access this post."], 403);
+        }
         $data = DB::select('
             SELECT 
                 r.code,

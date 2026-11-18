@@ -17,6 +17,7 @@ class CommentPost extends Model
         'status',
         'code',
         'comment',
+        'attachment_url',
         'date_comment',
         'created_by',
         'updated_by'

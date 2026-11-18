@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Helpers\MediaUrl;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Notifications\Notifiable;
@@ -22,6 +23,12 @@ class Attachmentpost extends Model
         'created_by',
         'updated_by',
     ];
+
+    /** Always hand the client a URL that works on the current host (see MediaUrl). */
+    public function getPathUrlAttribute($value)
+    {
+        return MediaUrl::normalize($value);
+    }
 
 
 }

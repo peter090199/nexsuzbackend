@@ -19,6 +19,10 @@
     </coverage>
     <php>
         <env name="APP_ENV" value="testing"/>
+        <!-- tests must never read the dev cache files (php artisan optimize / config:cache / route:cache) -->
+        <env name="APP_CONFIG_CACHE" value="bootstrap/cache/config.phpunit.php"/>
+        <env name="APP_ROUTES_CACHE" value="bootstrap/cache/routes.phpunit.php"/>
+        <env name="APP_KEY" value="base64:dGVzdGluZ2tleXRlc3RpbmdrZXl0ZXN0aW5na2V5MTI="/>
         <env name="BCRYPT_ROUNDS" value="4"/>
         <env name="CACHE_DRIVER" value="array"/>
         <!-- <env name="DB_CONNECTION" value="sqlite"/> -->

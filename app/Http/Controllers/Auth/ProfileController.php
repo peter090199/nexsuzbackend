@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Auth;
 
+use App\Helpers\MediaUrl;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth; 
@@ -27,99 +28,212 @@ use Illuminate\Support\Facades\Storage;
 
 class ProfileController extends Controller
 {
+    // ------------------------------------------------------------------
+    //  Profile photo and cover photo (own account only)
+    //
+    //  The browser sends the already cropped image as multipart/form-data. Files live on the
+    //  public disk under uploads/{code}/cvphoto|coverphoto/{uuid}/; the existing columns
+    //  (userprofiles.photo_pic, users.coverphoto, resources.coverphoto) keep the URL.
+    // ------------------------------------------------------------------
+
+    private const IMAGE_RULES = 'required|file|mimes:jpeg,jpg,png,gif,webp|max:5120';
+
+    private function imageMessages(): array
+    {
+        return [
+            'photo.mimes'            => 'The photo must be a JPG, PNG, GIF or WEBP image.',
+            'photo.image'            => 'The photo must be an image.',
+            'photo.max'              => 'The photo must be 5 MB or smaller.',
+            'photo.uploaded'         => 'The photo could not be uploaded. It may be larger than the server allows.',
+            'coverphoto.mimes'       => 'The cover photo must be a JPG, PNG, GIF or WEBP image.',
+            'coverphoto.image'       => 'The cover photo must be an image.',
+            'coverphoto.max'         => 'The cover photo must be 5 MB or smaller.',
+            'coverphoto.uploaded'    => 'The cover photo could not be uploaded. It may be larger than the server allows.',
+        ];
+    }
+
+    private function imageValidationFailed($validator)
+    {
+        return response()->json([
+            'success' => false,
+            'message' => $validator->errors()->first(),
+            'errors'  => $validator->errors(),
+        ], 422);
+    }
+
+    /** Write the file under uploads/{code}/{kind}/{uuid}/ and return its URL on this server. */
+    private function storeProfileImage($file, $userCode, string $kind): string
+    {
+        $ext = strtolower($file->guessExtension() ?: $file->getClientOriginalExtension());
+        $folder = "uploads/{$userCode}/{$kind}/" . Str::uuid();
+        $name = time() . '.' . $ext;
+        $file->storeAs($folder, $name, 'public');
+
+        return url("storage/{$folder}/{$name}");
+    }
+
+    /** Delete the folder holding a stored image, but ONLY if it is one of this user's own photo folders. */
+    private function deleteOwnImageFolder(?string $stored, $userCode, string $kind): void
+    {
+        $relative = MediaUrl::relativePath($stored);
+        $prefix = "uploads/{$userCode}/{$kind}/";
+
+        if ($relative && str_starts_with($relative, $prefix) && dirname($relative) !== rtrim($prefix, '/')) {
+            Storage::disk('public')->deleteDirectory(dirname($relative));
+        }
+    }
+
+    /** POST uploadCoverPhoto  { coverphoto: image } */
     public function uploadCoverPhoto(Request $request)
     {
-        // Ensure the user is authenticated
         if (!Auth::check()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Unauthorized access.',
-            ], 401);
+            return response()->json(['success' => false, 'message' => 'Unauthorized access.'], 401);
+        }
+
+        $validator = Validator::make($request->all(), ['coverphoto' => self::IMAGE_RULES], $this->imageMessages());
+        if ($validator->fails()) {
+            return $this->imageValidationFailed($validator);
+        }
+
+        $userCode = Auth::user()->code;
+        $old = DB::table('users')->where('code', $userCode)->value('coverphoto');
+        $url = $this->storeProfileImage($request->file('coverphoto'), $userCode, 'coverphoto');
+
+        try {
+            DB::beginTransaction();
+            DB::table('users')->where('code', $userCode)->update(['coverphoto' => $url, 'updated_at' => now()]);
+            DB::table('resources')->where('code', $userCode)->update(['coverphoto' => $url, 'updated_at' => now()]);
+            DB::commit();
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            $this->deleteOwnImageFolder($url, $userCode, 'coverphoto');   // do not leave the new upload behind
+            report($e);
+
+            return response()->json(['success' => false, 'message' => 'The cover photo could not be saved. Please try again.'], 500);
+        }
+
+        $this->deleteOwnImageFolder($old, $userCode, 'coverphoto');       // the replaced photo's file
+
+        return response()->json([
+            'success'    => true,
+            'message'    => 'Cover photo uploaded successfully.',
+            'coverphoto' => MediaUrl::normalize($url),
+        ], 201);
+    }
+
+    /** POST removeCoverPhoto — back to "no cover" (the column's own default). */
+    public function removeCoverPhoto()
+    {
+        if (!Auth::check()) {
+            return response()->json(['success' => false, 'message' => 'Unauthorized access.'], 401);
+        }
+
+        $userCode = Auth::user()->code;
+        $old = DB::table('users')->where('code', $userCode)->value('coverphoto');
+
+        DB::transaction(function () use ($userCode) {
+            DB::table('users')->where('code', $userCode)->update(['coverphoto' => 'default.jpg', 'updated_at' => now()]);
+            DB::table('resources')->where('code', $userCode)->update(['coverphoto' => 'default.jpg', 'updated_at' => now()]);
+        });
+        $this->deleteOwnImageFolder($old, $userCode, 'coverphoto');
+
+        return response()->json(['success' => true, 'message' => 'Cover photo removed.', 'coverphoto' => null]);
+    }
+
+    /**
+     * POST uploadProfilePhoto  { photo: image }
+     * Changes ONLY the photo: unlike saveProfile it never touches the other profile fields.
+     */
+    public function uploadProfilePhoto(Request $request)
+    {
+        if (!Auth::check()) {
+            return response()->json(['success' => false, 'message' => 'Unauthorized access.'], 401);
+        }
+
+        $validator = Validator::make($request->all(), ['photo' => self::IMAGE_RULES], $this->imageMessages());
+        if ($validator->fails()) {
+            return $this->imageValidationFailed($validator);
         }
 
         $user = Auth::user();
         $userCode = $user->code;
-        $coverPhotoPath = null;
+        $old = UserProfile::where('code', $userCode)->value('photo_pic');
+        $url = $this->storeProfileImage($request->file('photo'), $userCode, 'cvphoto');
 
         try {
             DB::beginTransaction();
-
-            // Validate the uploaded file
-            $validator = Validator::make($request->all(), [
-                'coverphoto' => 'required|file|image|mimes:jpeg,jpg,png,gif|max:5120',
-            ]);
-
-            if ($validator->fails()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => $validator->errors()->all(),
-                ], 422);
-            }
-
-            // 🔹 Delete the old cover photo folder if exists
-            if ($user->coverphoto) {
-                // Convert full URL to relative storage path
-                $relativePath = str_replace(
-                    'https://api.nexsuz.com/storage/app/public/',
-                    '',
-                    $user->coverphoto
-                );
-
-                // Get the folder containing the file
-                $folderPath = dirname($relativePath);
-
-                // Delete entire folder from 'public' disk
-                if (Storage::disk('public')->exists($folderPath)) {
-                    Storage::disk('public')->deleteDirectory($folderPath);
-                }
-            }
-
-            // 🔹 Handle new file upload
-            if ($request->hasFile('coverphoto')) {
-                $file = $request->file('coverphoto');
-                $uuid = Str::uuid();
-                $folderPath = "uploads/{$userCode}/coverphoto/{$uuid}";
-                $fileName = time() . '.' . $file->getClientOriginalExtension();
-
-                // Store file in the "public" disk (storage/app/public)
-                $file->storeAs($folderPath, $fileName, 'public');
-
-                // Build accessible URL
-                $coverPhotoPath = "https://api.nexsuz.com/storage/{$folderPath}/{$fileName}";
-            }
-
-            // 🔹 Update in database
-            DB::table('users')
-                ->where('code', $userCode)
-                ->update([
-                    'coverphoto' => $coverPhotoPath,
-                    'updated_at' => now(),
+            if (UserProfile::where('code', $userCode)->exists()) {
+                UserProfile::where('code', $userCode)->update(['photo_pic' => $url, 'updated_at' => now()]);
+            } else {
+                UserProfile::insert([
+                    'code'               => $userCode,
+                    'transNo'            => (int) UserProfile::max('transNo') + 1,
+                    'email'              => $user->email,
+                    'contact_visibility' => false,
+                    'email_visibility'   => false,
+                    'photo_pic'          => $url,
+                    'created_at'         => now(),
+                    'updated_at'         => now(),
                 ]);
-
-            DB::table('resources')
-                ->where('code', $userCode)
-                ->update([
-                    'coverphoto' => $coverPhotoPath,
-                    'updated_at' => now(),
-                ]);
-
+            }
             DB::commit();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Cover photo uploaded successfully.',
-                'coverphoto' => $coverPhotoPath
-            ], 201);
-
-        } catch (\Throwable $th) {
+        } catch (\Throwable $e) {
             DB::rollBack();
-            return response()->json([
-                'success' => false,
-                'message' => 'Error occurred: ' . $th->getMessage(),
-            ], 500);
+            $this->deleteOwnImageFolder($url, $userCode, 'cvphoto');
+            report($e);
+
+            return response()->json(['success' => false, 'message' => 'The photo could not be saved. Please try again.'], 500);
         }
+
+        $this->deleteOwnImageFolder($old, $userCode, 'cvphoto');
+
+        return response()->json([
+            'success'   => true,
+            'message'   => 'Profile photo updated successfully.',
+            'photo_pic' => MediaUrl::normalize($url),
+        ], 201);
     }
 
+    /**
+     * GET media?path=<stored url or uploads/... path>
+     *
+     * Streams an uploaded image through Laravel so the response carries the CORS headers
+     * (files under /storage are served straight from disk and never get them). The browser needs
+     * this to draw a photo into a canvas, e.g. when exporting the CV to PDF.
+     * Only images under uploads/ on the public disk are served.
+     */
+    public function media(Request $request)
+    {
+        $relative = MediaUrl::relativePath((string) $request->query('path'));
+
+        if (!$relative
+            || !str_starts_with($relative, 'uploads/')
+            || str_contains($relative, '..')
+            || !preg_match('/\.(jpe?g|png|gif|webp|jfif)$/i', $relative)
+            || !Storage::disk('public')->exists($relative)) {
+            return response()->json(['success' => false, 'message' => 'Image not found.'], 404);
+        }
+
+        return response()->file(Storage::disk('public')->path($relative), [
+            'Cache-Control' => 'private, max-age=300',
+        ]);
+    }
+
+    /** POST removeProfilePhoto — the default avatar is shown again. */
+    public function removeProfilePhoto()
+    {
+        if (!Auth::check()) {
+            return response()->json(['success' => false, 'message' => 'Unauthorized access.'], 401);
+        }
+
+        $userCode = Auth::user()->code;
+        $old = UserProfile::where('code', $userCode)->value('photo_pic');
+
+        UserProfile::where('code', $userCode)->update(['photo_pic' => null, 'updated_at' => now()]);
+        $this->deleteOwnImageFolder($old, $userCode, 'cvphoto');
+
+        return response()->json(['success' => true, 'message' => 'Profile photo removed.', 'photo_pic' => null]);
+    }
 
     public function index()
     {
@@ -530,9 +644,8 @@ class ProfileController extends Controller
                 'contact_visibility' => (bool) $profile->contact_visibility,
                 'email_visibility' => (bool) $profile->email_visibility,
                 'date_birth' => $profile->date_birth,
-                'photo_pic' => $profile->photo_pic 
-                    ? asset("uploads/{$profile->code}/cvphoto/{$profile->photo_pic}") 
-                    : null,
+                // stored value is already a full URL (normalized to this server by NormalizeMediaUrls)
+                'photo_pic' => $profile->photo_pic ?: null,
                 'home_state' => $profile->home_state,
                 'current_state' => $profile->current_state,
                 'home_country' => $profile->home_country,
@@ -703,7 +816,7 @@ class ProfileController extends Controller
                 $folderPath = "uploads/{$userCode}/cvphoto/{$uuid}";
                 $fileName = time() . '.' . $file->getClientOriginalExtension();
                 $filePath = $file->storeAs($folderPath, $fileName, 'public');
-                $photoPath = "https://api.nexsuz.com/storage/{$folderPath}/{$fileName}";
+                $photoPath = url("storage/{$folderPath}/{$fileName}");
             }
 
             $contactVisibility = isset($data['contact_visibility']) ? (bool) $data['contact_visibility'] : false;
@@ -849,28 +962,35 @@ class ProfileController extends Controller
 
         // ✅ Get common resource info once
         $resource = DB::table('resources')
-            ->select('fname', 'lname', 'email', 'profession')
+            ->select('fname', 'lname', 'email', 'profession', 'contact_no', 'date_birth', 'home_country', 'current_location')
             ->where('code', $currentUserCode)
             ->first();
 
         $result = [];
 
-        foreach ($userProfiles as $profile) {
+        // A user can have CV entries (education, skills, jobs...) before a userprofiles row exists
+        // (the row is only created once a photo is saved). Still return their CV instead of nothing.
+        $rows = $userProfiles->all();
+        if (empty($rows) && $resource) {
+            $rows = [(object) []];
+        }
+
+        foreach ($rows as $profile) {
             $result[] = [
                 "code" => $currentUserCode,
                 "email" => $resource->email ?? null,
                 "fname" => $resource->fname ?? null,
                 "lname" => $resource->lname ?? null,
-                "photo_pic" => $profile->photo_pic ?? 'https://exploredition.com/storage/app/public/uploads/DEFAULTPROFILE/DEFAULTPROFILE.png',
-                "contact_no" => $profile->contact_no,
-                "contact_visibility" => $profile->contact_visibility,
-                "email_visibility" => $profile->email_visibility,
-                "summary" => $profile->summary,
-                "date_birth" => $profile->date_birth,
-                "home_country" => $profile->home_country,
-                "current_location" => $profile->current_location,
-                "home_state" => $profile->home_state,
-                "current_state" => $profile->current_state,
+                "photo_pic" => $profile->photo_pic ?? null, // null = account has no picture; the UI shows the default avatar
+                "contact_no" => $profile->contact_no ?? $resource->contact_no ?? null,
+                "contact_visibility" => $profile->contact_visibility ?? 0,
+                "email_visibility" => $profile->email_visibility ?? 0,
+                "summary" => $profile->summary ?? null,
+                "date_birth" => $profile->date_birth ?? $resource->date_birth ?? null,
+                "home_country" => $profile->home_country ?? $resource->home_country ?? null,
+                "current_location" => $profile->current_location ?? $resource->current_location ?? null,
+                "home_state" => $profile->home_state ?? null,
+                "current_state" => $profile->current_state ?? null,
                 "profession" => $resource->profession ?? null,
                 "lines" => [
                     "education" => DB::table('usereducations')

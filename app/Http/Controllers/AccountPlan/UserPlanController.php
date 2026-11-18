@@ -235,7 +235,7 @@ class UserPlanController extends Controller
 
     public function show($planId)
     {
-        $plan = UserPlan::find($planId);
+        $plan = UserPlan::where('planId', $planId)->first();
 
         if (!$plan) {
             return response()->json([
@@ -243,6 +243,22 @@ class UserPlanController extends Controller
                 'message' => 'Plan not found.'
             ], 404);
         }
+
+        // Admin screens may still need inactive plans; checkout must not offer them.
+        $role = Auth::check() ? Auth::user()->role ?? null : null;
+        $isAdmin = in_array($role, ['DEF-ADMIN', 'DEF-MASTERADMIN'], true);
+
+        if ($plan->recordStatus !== 'active' && !$isAdmin) {
+            return response()->json([
+                'success' => false,
+                'message' => 'This plan is no longer available.'
+            ], 410);
+        }
+
+        $plan->setAttribute('features', UserPlanDetails::where('planId', $plan->planId)
+            ->where('recordStatus', 'active')
+            ->orderBy('id')
+            ->get(['fid', 'feature_code', 'feature_name', 'feature_value']));
 
         return response()->json([
             'success' => true,
@@ -353,6 +369,15 @@ class UserPlanController extends Controller
             $plan = UserPlan::where('planId', $request->planId)
                 ->lockForUpdate()
                 ->firstOrFail();
+
+            if ($plan->recordStatus !== 'active') {
+                DB::rollBack();
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'This plan is no longer available.'
+                ], 410);
+            }
 
             // Check if already subscribed
             $activeSubscription = UserSubscriptions::where('code', $user->code)

@@ -99,16 +99,13 @@ class SearchHistoryDAL extends Model
                 ];
             });
 
-        if ($history->isEmpty()) {
-            return response()->json([
-                'message' => 'No search history found.',
-                'data' => [],
-            ], 404);
-        }
-
+        // No history yet is a normal state, not an error: answer 200 with an empty list
         return response()->json([
-            'message' => '✅ Search history retrieved successfully.',
-            'data'    => $history,
+            'success' => true,
+            'message' => $history->isEmpty()
+                ? 'No search history found.'
+                : '✅ Search history retrieved successfully.',
+            'data'    => $history->values(),
         ]);
     }
 
