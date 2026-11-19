@@ -379,8 +379,13 @@ class ClientsDAL extends Model
                     s.code,
                     s.is_online,
                     s.source,
-                    f.id,
-                    COALESCE(f.follow_status, 'none') AS follow_status
+                    COALESCE(f1.id, f2.id) AS id,
+                    CASE
+                        WHEN f1.follow_status = 'accepted' OR f2.follow_status = 'accepted' THEN 'accepted'
+                        WHEN f1.follow_status = 'pending' THEN 'pending'
+                        WHEN f2.follow_status = 'pending' THEN 'connect_back'
+                        ELSE 'not_following'
+                    END AS follow_status
                 FROM (
                     -- Suggested users only (no UNION, no history)
                     SELECT 
@@ -408,11 +413,12 @@ class ClientsDAL extends Model
                         )
                     )
                 ) s
-                LEFT JOIN follows f 
-                    ON f.follower_code = ?
-                    AND f.following_code = s.code
+                -- I follow them
+                LEFT JOIN follows f1 ON f1.follower_code = ? AND f1.following_code = s.code
+                -- they follow me
+                LEFT JOIN follows f2 ON f2.follower_code = s.code AND f2.following_code = ?
                 ORDER BY s.fullname ASC
-            ", [$code, $profession, $code, $code]);
+            ", [$code, $profession, $code, $code, $code]);
 
             return response()->json([
                 'success' => true,
@@ -445,12 +451,12 @@ class ClientsDAL extends Model
                 u.is_online,
                 'history' AS source,
                 COALESCE(f1.id, f2.id) AS id,
-                CASE 
-                    WHEN f1.follow_status = 'accepted' AND f2.follow_status = 'accepted' THEN 'connected'
-                    WHEN f1.follow_status IS NOT NULL THEN f1.follow_status
-                    WHEN f2.follow_status IS NOT NULL THEN f2.follow_status
-                    ELSE 'not_following'
-                END AS follow_status
+                CASE
+                        WHEN f1.follow_status = 'accepted' OR f2.follow_status = 'accepted' THEN 'accepted'
+                        WHEN f1.follow_status = 'pending' THEN 'pending'
+                        WHEN f2.follow_status = 'pending' THEN 'connect_back'
+                        ELSE 'not_following'
+                    END AS follow_status
             FROM users u
             INNER JOIN resources r ON u.code = r.code
             LEFT JOIN userprofiles up ON u.code = up.code

@@ -127,6 +127,39 @@ class ActivityNotificationController extends Controller
                 ]));
         }
 
+        // ---- jobs (read from applied_jobs / jobPosting; updated_at moves when the status changes) ----
+        if ($prefs['job_applications']) {
+            DB::table('applied_jobs as aj')->join('jobPosting as jp', 'aj.transNo', '=', 'jp.transNo')
+                ->where('jp.code', $code)->where('aj.code', '<>', (string) $code)->where('aj.created_at', '>=', $since)
+                ->orderByDesc('aj.created_at')->limit(self::PER_CATEGORY)
+                ->get(['aj.applied_id', 'aj.code as actor', 'aj.job_name', 'aj.created_at'])
+                ->each(fn ($r) => $items->push([
+                    'id' => 'ja-' . $r->applied_id, 'type' => 'job_application', 'actor_code' => $r->actor,
+                    'text' => 'applied to your job posting', 'excerpt' => $r->job_name, 'created_at' => $r->created_at,
+                ]));
+        }
+
+        // status changes on MY applications; the actor is the employer who owns the posting
+        $mine = fn () => DB::table('applied_jobs as aj')->join('jobPosting as jp', 'aj.transNo', '=', 'jp.transNo')
+            ->where('aj.code', (string) $code)->where('aj.updated_at', '>=', $since)
+            ->orderByDesc('aj.updated_at')->limit(self::PER_CATEGORY);
+        $push = fn ($rows, string $prefix, string $type, string $text) => $rows->each(fn ($r) => $items->push([
+            'id' => $prefix . $r->applied_id, 'type' => $type, 'actor_code' => $r->actor,
+            'text' => $text, 'excerpt' => $r->job_name, 'created_at' => $r->at,
+        ]));
+        $cols = ['aj.applied_id', 'jp.code as actor', 'aj.job_name', 'aj.updated_at as at'];
+
+        if ($prefs['job_interviews']) {
+            $push($mine()->where('aj.applied_status', 'interview')->get($cols), 'ji-', 'job_interview', 'invited you to an interview');
+        }
+        if ($prefs['job_reviews']) {
+            $push($mine()->where('aj.applied_status', 'review')->get($cols), 'jr-', 'job_review', 'is reviewing your application');
+        }
+        if ($prefs['job_status']) {
+            $push($mine()->where('aj.applied_status', 'approved')->get($cols), 'jh-', 'job_status', 'approved your application');
+            $push($mine()->where('aj.applied_status', 'reject')->get($cols), 'jx-', 'job_status', 'did not move forward with your application');
+        }
+
         return $items;
     }
 

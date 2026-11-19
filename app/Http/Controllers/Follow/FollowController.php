@@ -371,9 +371,10 @@ class FollowController extends Controller
     public function update(string $code)
     {
         $user = Auth::user();
-        $followerCode = $user->code;
+        $followerCode = (string) $user->code;
+        $code = (string) $code;
 
-        // Prevent following yourself
+        // Prevent following yourself (compared as strings: the route gives a string, the user's code may be an int)
         if ($code === $followerCode) {
             return response()->json([
                 'status' => false,
@@ -411,6 +412,29 @@ class FollowController extends Controller
             }
 
             /**
+             * They already asked me: connecting back accepts their request (no second, duplicate row)
+             */
+            $incoming = DB::table('follows')
+                ->where('follower_code', $code)
+                ->where('following_code', $followerCode)
+                ->first();
+
+            if ($incoming) {
+                if ($incoming->follow_status === 'pending') {
+                    DB::table('follows')->where('id', $incoming->id)
+                        ->update(['follow_status' => 'accepted', 'created_at' => now(), 'updated_at' => now()]);
+                }
+                DB::commit();
+
+                return response()->json([
+                    'status' => true,
+                    'message' => 'You are now connected.',
+                    'follow_status' => 'accepted',
+                    'follow_id' => $incoming->id
+                ]);
+            }
+
+            /**
              * Check connection limit
              */
             $connection = SharedRoutine::canAddConnection($followerCode);
@@ -427,7 +451,7 @@ class FollowController extends Controller
             /**
              * Create follow request
              */
-            DB::table('follows')->insert([
+            $newId = DB::table('follows')->insertGetId([
                 'follower_code' => $followerCode,
                 'following_code' => $code,
                 'follow_status' => 'pending',
@@ -441,6 +465,7 @@ class FollowController extends Controller
                 'status' => true,
                 'message' => 'Follow request sent.',
                 'follow_status' => 'pending',
+                'follow_id' => $newId,
                 'current_connections' => $connection['current'] + 1,
                 'connection_limit' => $connection['limit']
             ]);

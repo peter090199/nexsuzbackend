@@ -30,6 +30,11 @@ class NotificationPrefs
         'friend_accepts'       => true,
         'post_reactions'       => true,
         'post_comments'        => true,
+        // jobs
+        'job_applications'     => true,    // someone applied to my job posting
+        'job_interviews'       => true,    // I was invited to an interview
+        'job_status'           => true,    // my application was approved / rejected
+        'job_reviews'          => true,    // my application is under review
         // appearance: background colour of the navigation bars, "#rrggbb", or null for the standard look
         'nav_color'            => null,
     ];
@@ -40,6 +45,7 @@ class NotificationPrefs
     public const BOOLEAN_KEYS = [
         'messages_enabled', 'message_preview', 'unread_badge', 'desktop_notifications', 'toast', 'sound',
         'friend_requests', 'friend_accepts', 'post_reactions', 'post_comments',
+        'job_applications', 'job_interviews', 'job_status', 'job_reviews',
     ];
 
     /** The activity feed categories and the preference that controls each */
@@ -48,6 +54,10 @@ class NotificationPrefs
         'friend_accept'  => 'friend_accepts',
         'reaction'       => 'post_reactions',
         'comment'        => 'post_comments',
+        'job_application' => 'job_applications',
+        'job_interview'  => 'job_interviews',
+        'job_status'     => 'job_status',
+        'job_review'     => 'job_reviews',
     ];
 
     /** Laravel validation rules for a (partial) update */
