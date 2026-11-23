@@ -71,7 +71,7 @@ class ReactionController extends Controller
         }
     }
 
-    public function getReactionPost(string $post_id)
+    public function getreactionpost(string $post_id)
     {
         if (!PostVisibility::canViewPostId($post_id, \Illuminate\Support\Facades\Auth::user()?->code) && \Illuminate\Support\Facades\DB::table('posts')->where('id', $post_id)->exists()) {
             return response()->json(['success' => false, 'message' => "You can't access this post."], 403);
@@ -84,7 +84,7 @@ class ReactionController extends Controller
                 r.post_id,
                 r.reaction,
                 r.create_at
-            FROM reactionPost AS r
+            FROM reactionpost AS r
             LEFT JOIN users AS u 
                 ON u.code = r.code
             LEFT JOIN userprofiles AS pf 
