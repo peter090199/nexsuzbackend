@@ -58,7 +58,7 @@ class FollowController extends Controller
 
         // One reaction per user per post. The UNIQUE (post_id, code) index makes this atomic:
         // a repeated click or a double submit changes the reaction, it can never create a second row.
-        DB::table('reactionPost')->upsert(
+        DB::table('reactionpost')->upsert(
             [[
                 'post_id'    => $postId,
                 'code'       => (string) $userCode,
@@ -94,7 +94,7 @@ class FollowController extends Controller
     {
         $request->validate(['post_id' => 'required|integer']);
 
-        $removed = DB::table('reactionPost')
+        $removed = DB::table('reactionpost')
             ->where('post_id', $request->post_id)
             ->where('code', Auth::user()->code)
             ->delete();
@@ -129,7 +129,7 @@ class FollowController extends Controller
         }
 
         // Get the user's reaction for the post
-        $reaction = DB::table('reactionPost')
+        $reaction = DB::table('reactionpost')
             ->where('post_id', $id)
             ->where('code', $userCode)
             ->value('reaction'); // returns null if no reaction
@@ -210,7 +210,7 @@ class FollowController extends Controller
                 'profile_pic' => $post->profile_pic,
                 'fullname' => $post->fullname,
                 'is_owner' => (string) $post->post_owner === (string) $currentUserCode,
-                'my_reaction' => DB::table('reactionPost')
+                'my_reaction' => DB::table('reactionpost')
                     ->where('post_id', $post->id)
                     ->where('code', $currentUserCode)
                     ->value('reaction'),
