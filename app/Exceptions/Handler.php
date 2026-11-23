@@ -2,6 +2,7 @@
 
 namespace App\Exceptions;
 
+use Illuminate\Auth\AuthenticationException;
 use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
 use Throwable;
 
@@ -44,5 +45,19 @@ class Handler extends ExceptionHandler
         $this->reportable(function (Throwable $e) {
             //
         });
+    }
+
+    /**
+     * Every /api/* route answers an unauthenticated request with a JSON 401, whatever the Accept header says.
+     * Without this, opening a protected API URL in a browser address bar (which sends Accept: text/html and cannot
+     * send a Bearer token) was redirected to /api/login, a POST-only route, and ended on "405 Method Not Allowed".
+     */
+    protected function unauthenticated($request, AuthenticationException $exception)
+    {
+        if ($request->is('api/*') || $request->expectsJson()) {
+            return response()->json(['success' => false, 'message' => 'Unauthenticated. Sign in and send your access token.'], 401);
+        }
+
+        return parent::unauthenticated($request, $exception);
     }
 }

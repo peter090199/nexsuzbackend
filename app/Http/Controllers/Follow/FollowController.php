@@ -324,6 +324,7 @@ class FollowController extends Controller
                     OR p.code = ?
                     OR (p.status = 1 AND u.role_code = 'DEF-MASTERADMIN') 
                 )
+                " . \App\Services\BlockService::sqlNotIn('p.code', $currentUserCode) . "
                 ORDER BY p.created_at DESC
             ", [$currentUserCode, $currentUserCode, $currentUserCode]);
 
@@ -380,6 +381,11 @@ class FollowController extends Controller
                 'status' => false,
                 'message' => 'You cannot follow yourself.'
             ], 400);
+        }
+
+        // no connection requests between blocked accounts (either direction)
+        if (\App\Services\BlockService::isBlocked($followerCode, $code)) {
+            return \App\Services\BlockService::denied();
         }
 
         DB::beginTransaction();

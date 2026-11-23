@@ -2,6 +2,7 @@
 
 namespace App\Helpers;
 
+use App\Services\BlockService;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -43,6 +44,11 @@ class PostVisibility
             return true;                                   // owners always see their own posts
         }
 
+        // a block (either direction) hides posts, and with them comments and reactions
+        if (BlockService::isBlocked($ownerCode, $viewerCode)) {
+            return false;
+        }
+
         switch ((int) $status) {
             case self::PUBLIC:  return true;
             case self::FRIENDS: return self::areFriends($ownerCode, $viewerCode);
@@ -80,6 +86,10 @@ class PostVisibility
     {
         if ((string) $ownerCode === (string) $viewerCode) {
             return [self::PRIVATE, self::PUBLIC, self::FRIENDS];
+        }
+
+        if (BlockService::isBlocked($ownerCode, $viewerCode)) {
+            return [];                                     // nothing of a blocked account's is visible
         }
 
         return self::areFriends($ownerCode, $viewerCode) ? [self::PUBLIC, self::FRIENDS] : [self::PUBLIC];

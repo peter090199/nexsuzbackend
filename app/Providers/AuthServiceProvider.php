@@ -2,7 +2,7 @@
 
 namespace App\Providers;
 
-// use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Foundation\Support\Providers\AuthServiceProvider as ServiceProvider;
 
 class AuthServiceProvider extends ServiceProvider
@@ -23,6 +23,7 @@ class AuthServiceProvider extends ServiceProvider
     {
         $this->registerPolicies();
 
-        //
+        // global job posting templates & themes: DEF-MASTERADMIN only (DEF-ADMIN is not enough)
+        Gate::define('manage-job-templates', fn ($user) => ($user->role_code ?? null) === 'DEF-MASTERADMIN');
     }
 }

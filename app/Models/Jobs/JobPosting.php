@@ -31,6 +31,20 @@ class JobPosting extends Model
         'applied_status',
         'currency',
         'max_salary',
-        'min_salary'
+        'min_salary',
+        'recordstatus',
+        'vacancies',
+        'employment_type',
+        'experience_level',
+        'salary_period',
+        'education',
+        'required_skills',
+        'preferred_qualifications',
+        'application_deadline',
+        'allow_cv',
+        'application_limit',
+        'min_pass_score',
+        'auto_screen',
+        'template_id'
     ];
 }

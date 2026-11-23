@@ -27,7 +27,12 @@ class Question extends Model
         'company',
         'updated_at',
         'create_at',
-        'status'
+        'status',
+        'question_type',
+        'options',
+        'is_required',
+        'correct_answer',
+        'sort_order'
     ];
 
    

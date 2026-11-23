@@ -22,6 +22,12 @@ class ChatController extends Controller
             'receiver_id.exists' => 'That person could not be found.',
             'receiver_id.not_in' => 'You cannot message yourself.',
         ]);
+        // blocked accounts cannot message each other (either direction); old messages are kept
+        $receiverCode = DB::table('users')->where('id', $request->receiver_id)->value('code');
+        if (\App\Services\BlockService::isBlocked(Auth::user()->code, $receiverCode)) {
+            return \App\Services\BlockService::denied();
+        }
+
         $codeuser = Auth::user()->code;
         $message = Message::create([
             'sender_id' => auth()->id(),
@@ -96,6 +102,7 @@ class ChatController extends Controller
             ->leftJoin('userprofiles', 'userprofiles.code', '=', 'users.code')
             ->select('users.id', 'users.code', 'users.status', 'users.fullname', 'userprofiles.photo_pic','users.is_online')
             ->where('users.status', 'A')
+            ->whereNotIn('users.code', \App\Services\BlockService::relatedCodes(Auth::user()->code))
             ->get();
 
         return response()->json($users);
@@ -240,6 +247,7 @@ class ChatController extends Controller
             $unreadTotal += (int) $r->unread;
             $data[] = [
                 'user_id' => (int) $u->id,
+                'blocked' => \App\Services\BlockService::isBlocked(Auth::user()->code, $u->code),   // UI: history stays, sending is off
                 'code' => $u->code,
                 'fullname' => $u->fullname,
                 'photo_pic' => $u->photo_pic,

@@ -302,6 +302,20 @@ class ProfileController extends Controller
         //  return response()->json(['testn' => $data]);
          // Check if the user is authenticated
          if (Auth::check()) {
+             // Only DEF-USERS create a CV. Other roles may still update the contact / privacy fields of a
+             // profile row that already exists (Settings uses this same endpoint), but they can never create
+             // the profile row or send CV sections (education, skills, ...).
+             if (!\App\Http\Middleware\EnsureCanCreateCv::allows(Auth::user())) {
+                 $alreadyHasProfile = UserProfile::where('code', Auth::user()->code)->exists()
+                     || \App\Http\Middleware\EnsureCanCreateCv::allowsProfileOnly(Auth::user());   // administrators may create the basic profile
+                 if (!$alreadyHasProfile || $request->has('lines')) {
+                     return response()->json([
+                         'success' => false,
+                         'message' => 'Your account type cannot create or edit a CV.',
+                     ], 403);
+                 }
+             }
+
              try {
                  DB::beginTransaction();
                  $data = $request->all();
@@ -348,13 +362,17 @@ class ProfileController extends Controller
                         'current_location' => $data['current_location'],
                         'current_state' => $data['current_state']
                     ]);
-                    Usereducation::where('code', Auth::user()->code)->delete();
-                    Usercapabilitie::where('code', Auth::user()->code)->delete();
-                    Usertraining::where('code', Auth::user()->code)->delete();
-                    Userseminar::where('code', Auth::user()->code)->delete();
-                    Userskill::where('code', Auth::user()->code)->delete();
-                    Useremploymentrecord::where('code', Auth::user()->code)->delete();
-                    Usercertificate::where('code', Auth::user()->code)->delete();
+                    // Replace the CV sections ONLY when the request actually carries sections (legacy payload).
+                    // A plain profile update (Settings, CV builder steps) must not wipe existing CV records.
+                    if ($request->has('lines')) {
+                        Usereducation::where('code', Auth::user()->code)->delete();
+                        Usercapabilitie::where('code', Auth::user()->code)->delete();
+                        Usertraining::where('code', Auth::user()->code)->delete();
+                        Userseminar::where('code', Auth::user()->code)->delete();
+                        Userskill::where('code', Auth::user()->code)->delete();
+                        Useremploymentrecord::where('code', Auth::user()->code)->delete();
+                        Usercertificate::where('code', Auth::user()->code)->delete();
+                    }
                 }
                  else{
                     // $photoPath = null;
@@ -508,11 +526,36 @@ class ProfileController extends Controller
     }
      
 
+    /** @return array{has_resume:bool, count:int, default:?array{id:int,name:string,size:int,uploaded_at:?string}} */
+    private function resumeSummary(int $code): array
+    {
+        if (!\Illuminate\Support\Facades\Schema::hasTable('user_resumes')) {
+            return ['has_resume' => false, 'count' => 0, 'default' => null];
+        }
+
+        $rows = DB::table('user_resumes')->where('code', $code)->orderByDesc('is_default')->orderByDesc('id')->get();
+        $default = $rows->first();     // the default one sorts first (or the newest, if none is marked)
+
+        return [
+            'has_resume' => $rows->isNotEmpty(),
+            'count' => $rows->count(),
+            'default' => $default ? [
+                'id' => (int) $default->id, 'name' => $default->original_name,
+                'size' => (int) $default->size, 'uploaded_at' => $default->created_at,
+            ] : null,
+        ];
+    }
+
     /**
      * Display the specified resource.
      */
     public function show(string $id)
     {
+        // a blocked account's profile is "not available" in both directions
+        if (Auth::check() && \App\Services\BlockService::isBlocked(Auth::user()->code, $id)) {
+            return response()->json(['success' => false, 'blocked' => true, 'message' => 'This profile is not available.'], 404);
+        }
+
         try {
             $resource = Resource::where('code', $id)->get();
             
@@ -526,19 +569,27 @@ class ProfileController extends Controller
         
                      $userprofile = Userprofile::where('code', $resource[$r]->code)->first() ?? null;
                 
+                    // The profile table is what the CV import and Settings write; the resource row is the older copy
+                    // made at sign up. Read the profile first, so what was imported shows up here straight away.
+                    $contactEmail = ($userprofile->email ?? null) ?: $resource[$r]->email;
+                    $contactNo = ($userprofile->contact_no ?? null) ?: $resource[$r]->contact_no;
+
                     $result= [
-                        "btnCurriculum" => $resource[$r]->code == Auth::user()->code ? 1  : '',
-                        "email" =>  $userprofile ? ($userprofile->code != Auth::user()->code && $userprofile->email_visibility === 0  ? ' '  : $resource[$r]->email ) : '',
+                        "role_code" => $resource[$r]->role_code,
+                        // the "New Curriculum Vitae" button: own profile AND an account type that may create a CV
+                        "btnCurriculum" => ($resource[$r]->code == Auth::user()->code
+                            && \App\Http\Middleware\EnsureCanCreateCv::allows(Auth::user())) ? 1  : '',
+                        "email" =>  $userprofile ? ($userprofile->code != Auth::user()->code && $userprofile->email_visibility === 0  ? ' '  : $contactEmail ) : '',
                         "fname" => $resource[$r]->fname,
                         "lname" => $resource[$r]->lname,
                         "photo_pic" => $userprofile->photo_pic ?? 'https://exploredition.com/storage/app/public/uploads/DEFAULTPROFILE/DEFAULTPROFILE.png',
-                        "contact_no" => $userprofile ? ($userprofile->code != Auth::user()->code && $userprofile->contact_visibility == 0  ? ' '  : $resource[$r]->contact_no ) : '',
+                        "contact_no" => $userprofile ? ($userprofile->code != Auth::user()->code && $userprofile->contact_visibility == 0  ? ' '  : $contactNo ) : '',
                         "contact_visibility" => $userprofile->contact_visibility ??  null,
                         "email_visibility" => $userprofile->email_visibility ??  null,
                         "summary" => $userprofile->summary ?? null,
-                        "date_birth" => $resource[$r]->date_birth,
-                        "home_country" =>  $resource[$r]->date_birth,
-                        "current_location" => $resource[$r]->current_location,
+                        "date_birth" => ($userprofile->date_birth ?? null) ?: $resource[$r]->date_birth,
+                        "home_country" => ($userprofile->home_country ?? null) ?: $resource[$r]->home_country,   // was returning the date of birth
+                        "current_location" => ($userprofile->current_location ?? null) ?: $resource[$r]->current_location,
                         "home_state" => $userprofile->home_state??  null,
                         "current_state" => $userprofile->current_state??  null,
                         "profession" => $resource[$r]->profession,
@@ -565,13 +616,32 @@ class ProfileController extends Controller
                         ]
                     ];
                 }
-                
+
+                // Admin and master admin accounts are staff, not job seekers or recruiters: they have no CV, so none is shown
+                $result['cv_available'] = !in_array($result['role_code'] ?? null, ['DEF-ADMIN', 'DEF-MASTERADMIN'], true);
+                if (!$result['cv_available']) {
+                    $result['summary'] = null;
+                    $result['date_birth'] = null;
+                    $result['home_country'] = null;
+                    $result['lines'] = ['education' => [], 'language' => [], 'training' => [], 'seminar' => [], 'skills' => [], 'employment' => [], 'certificate' => []];
+                }
+
+                // How job seekers provide their CV (master admin's setting): 'builder' (fill up the form) or 'upload' (upload only)
+                $result['cv_mode'] = \App\Services\CvModeService::mode();
+
+                // The owner's uploaded resumes / CV, detected here (Settings > Resume / CV). They are personal data, so
+                // only the owner of the profile gets them: everybody else sees `resume: null` and learns nothing.
+                $isOwn = Auth::check() && (string) $id === (string) Auth::user()->code;
+                $result['resume'] = ($isOwn && ($result['role_code'] ?? null) === 'DEF-USERS')
+                    ? $this->resumeSummary((int) $id)
+                    : null;
+
                 return response()->json([
                     'success' => true,
                     'message' => $result,
                 ]);
             } else {
-                
+
                 return response()->json([
                     'success' => false,
                     'message' => 'User not defined.',
@@ -684,6 +754,10 @@ class ProfileController extends Controller
     public function userAuthByCode($code)
     {
         if (Auth::check()) {
+            if (\App\Services\BlockService::isBlocked(Auth::user()->code, $code)) {
+                return response()->json(['success' => false, 'blocked' => true, 'message' => 'This profile is not available.'], 404);
+            }
+
             $user = DB::table('resources')
                 ->leftJoin('userprofiles', 'resources.code', '=', 'userprofiles.code')
                 ->select('resources.*', 'userprofiles.photo_pic')
@@ -768,6 +842,19 @@ class ProfileController extends Controller
             ], 401);
         }
 
+        // Only DEF-USERS create a CV. Other roles may still update the contact / privacy fields of a profile
+        // row that already exists (Settings uses this endpoint) but can never create the profile row.
+        // Administrators are the exception: they may create the basic profile row (no photo, no CV data required).
+        $profileOnly = \App\Http\Middleware\EnsureCanCreateCv::allowsProfileOnly(Auth::user());
+        if (!\App\Http\Middleware\EnsureCanCreateCv::allows(Auth::user())
+            && !$profileOnly
+            && !UserProfile::where('code', Auth::user()->code)->exists()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Your account type cannot create or edit a CV.',
+            ], 403);
+        }
+
         try {
             DB::beginTransaction();
 
@@ -825,7 +912,7 @@ class ProfileController extends Controller
             $exists = UserProfile::where('code', $userCode)->first();
 
             if ($exists) {
-                if (!$exists->photo_pic && !$photoPath) {
+                if (!$exists->photo_pic && !$photoPath && !$profileOnly) {
                     return response()->json([
                         'success' => false,
                         'message' => 'Please select a profile photo to complete your profile.',
@@ -835,7 +922,7 @@ class ProfileController extends Controller
                 $updateData = [
                     'contact_no' => $data['contact_no'] ?? null,
                     'contact_visibility' => $contactVisibility,
-                    'email' => $email,
+                    'email' => $exists->email ?: $email,         // keep a contact email imported from a CV
                     'email_visibility' => $emailVisibility,
                     'date_birth' => $formattedDateBirth,
                     'home_state' => $data['home_state'] ?? null,
@@ -852,7 +939,7 @@ class ProfileController extends Controller
                 UserProfile::where('code', $userCode)->update($updateData);
 
             } else {
-                if (!$photoPath) {
+                if (!$photoPath && !$profileOnly) {
                     return response()->json([
                         'success' => false,
                         'message' => 'Please select a photo before saving your profile.',
@@ -870,8 +957,8 @@ class ProfileController extends Controller
                     'email' => $email,
                     'email_visibility' => $emailVisibility,
                     'date_birth' => $formattedDateBirth,
-                    'home_state' => $data['home_state'],
-                    'home_country' => $data['home_country'],
+                    'home_state' => $data['home_state'] ?? null,
+                    'home_country' => $data['home_country'] ?? null,
                     'current_state' => $data['current_state'] ?? null,
                     'current_location' => $data['current_location'] ?? null,
                     'photo_pic' => $photoPath,

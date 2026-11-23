@@ -12,6 +12,7 @@ use App\Models\GeneratesTransNo\ControllNumbers;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
 use Carbon\Carbon;
+use Illuminate\Support\Str;
 use App\Models\AccountPlan\UserSubscriptionsDetails;
 
 
@@ -19,14 +20,69 @@ use App\Models\AccountPlan\UserSubscriptionsDetails;
 
 class PlanService
 {
+    /** Accounts that can hold a subscription plan: job seekers and recruiters. Admins and master admins never do. */
+    public const PLAN_ROLES = ['DEF-USERS', 'DEF-CLIENT'];
+
+    public static function roleCanHavePlan(?string $role): bool
+    {
+        return in_array($role, self::PLAN_ROLES, true);
+    }
+
+    /**
+     * Why this account may not take this plan, or null when it may.
+     * Job seeker plans are for DEF-USERS, recruiter plans for DEF-CLIENT; DEF-ADMIN / DEF-MASTERADMIN get none.
+     */
+    public static function subscribeBlocker(?string $role, UserPlan $plan): ?string
+    {
+        if (!self::roleCanHavePlan($role)) {
+            return 'Admin accounts do not use subscription plans.';
+        }
+        if ($plan->audience !== $role) {
+            return $plan->audience === 'DEF-CLIENT'
+                ? 'This plan is for recruiter accounts only.'
+                : 'This plan is for job seeker accounts only.';
+        }
+        return null;
+    }
+
+    /**
+     * The free starter plan for an audience: the active plan tagged STARTER, else the cheapest lowest-level active plan.
+     */
+    public static function starterPlan(string $role): ?UserPlan
+    {
+        $plans = UserPlan::where('recordStatus', 'active')->orderBy('plan_level')->orderBy('price')->get()
+            ->filter(fn ($p) => $p->audience === $role)->values();
+        return $plans->first(fn ($p) => strtoupper(trim((string) $p->tag)) === 'STARTER')
+            ?? $plans->first(fn ($p) => (float) $p->price == 0.0);
+    }
+
+    /**
+     * Gives a job seeker or recruiter the free starter plan when they have no active plan yet. Safe to call any time:
+     * does nothing for admins, for accounts that already have a plan, or when no starter plan is published. Never throws.
+     */
+    public static function ensureStarterPlan(string $code, ?string $role = null): ?UserSubscriptions
+    {
+        try {
+            $role ??= DB::table('users')->where('code', $code)->value('role_code');
+            if (!self::roleCanHavePlan($role)) { return null; }
+            if (UserSubscriptions::where('code', $code)->where('is_active', 'active')->exists()) { return null; }
+            $plan = self::starterPlan($role);
+            if (!$plan) { return null; }
+            return self::subscribeUser($code, $plan->planId, 'Free');
+        } catch (Throwable $e) {
+            Log::warning('Starter plan not activated: ' . $e->getMessage());
+            return null;
+        }
+    }
 
     public static function activateFreePlan()
     {
         DB::beginTransaction();
         try {
             $user = Auth::user();
+            $starter = self::starterPlan((string) $user->role_code);
             $existing = UserSubscriptions::where('code', $user->code)
-                ->where('planId', 'PLN000001')
+                ->where('planId', $starter->planId ?? 'PLN000001')
                 ->where('is_active', 'active')
                 ->first();
 
@@ -37,7 +93,7 @@ class PlanService
                     'message' => 'Your Free Plan is already active.'
                 ], 409);
             }
-            $subscription = PlanService::subscribeUser($user->code,'PLN000001','Free');
+            $subscription = PlanService::subscribeUser($user->code, $starter->planId ?? 'PLN000001', 'Free');
             DB::commit();
             return response()->json([
                 'success' => true,
@@ -45,6 +101,9 @@ class PlanService
                 'redirect_url' => "{$user->role}/home",
                 'data' => $subscription
             ]);
+        } catch (\DomainException $e) {   // not allowed for this account type
+            DB::rollBack();
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 403);
         } catch (\Throwable $e) {
             DB::rollBack();
             return response()->json([
@@ -70,6 +129,12 @@ class PlanService
         $plan = UserPlan::where('planId', $planId)
             ->lockForUpdate()
             ->firstOrFail();
+
+        // single choke point: every way of creating a subscription (checkout, free plan, admin assign) ends up here
+        $blocked = self::subscribeBlocker(DB::table('users')->where('code', $code)->value('role_code'), $plan);
+        if ($blocked) {
+            throw new \DomainException($blocked);
+        }
 
         $transNo = self::generateControlNumber('USER_SUBSCRIPTION');
 
@@ -99,7 +164,8 @@ class PlanService
             'is_active'      => 'active'
         ]);
 
-        $planIds = UserPlan::where('plan_level', '<=', $plan->plan_level)
+        $planIds = UserPlan::where('plan_level', '<=', $plan->plan_level)->get()
+            ->filter(fn ($p) => $p->audience === $plan->audience)
             ->pluck('planId');
 
         $features = UserPlanDetails::whereIn('planId', $planIds)
@@ -127,6 +193,7 @@ class PlanService
         if (!empty($details)) {
             UserSubscriptionDetails::insert($details);
         }
+        self::bust();
         return $subscription;
     }
 
@@ -137,29 +204,122 @@ class PlanService
             ->first();
     }
 
+    /**
+     * What an upgrade means in the enforced feature codes. A plan lists its perks by NAME ("Advanced Job Search"); the
+     * checks in the app read a few fixed codes (SEARCH_ACCESS ...). Without this a Basic subscriber would still read
+     * Free's "SEARCH_ACCESS = NO". A row that sets the real code itself always wins over one of these.
+     */
+    private const IMPLIES = [
+        'ADVANCED_JOB_SEARCH'   => ['SEARCH_ACCESS' => 'YES'],
+        'UNLIMITED_MESSAGING'   => ['MESSAGING_ACCESS' => 'YES'],
+        '100_CONNECTIONS_LIMIT' => ['CONNECTION_LIMIT' => '100'],
+        'UNLIMITED_CONNECTIONS' => ['CONNECTION_LIMIT' => '1000000'],
+        'UNLIMITED_JOB'         => ['APPLICATION_LIMIT' => 'UNLIMITED'],
+    ];
+
+    /** call after ANY change to plans, plan features or subscriptions: everyone's features are recalculated */
+    public static function bust(): void
+    {
+        Cache::forever('plan_global_ver', (int) Cache::get('plan_global_ver', 0) + 1);
+    }
+
+    /**
+     * The features of a user's CURRENT plan, worked out live from the plan setup (the Features plan page), not from a
+     * copy taken when they subscribed. A plan includes everything from the plans below it (by plan level); when two
+     * plans define the same feature the higher plan wins. Returns one row per feature_code.
+     */
+    public static function effectiveFeatures(string $code): \Illuminate\Support\Collection
+    {
+        $ver = (int) Cache::get('plan_global_ver', 0);
+        // keyed by the plan that really applies RIGHT NOW (see entitlement), so a plan expiring, being changed or being
+        // suspended is seen on the very next request, not after the cache runs out
+        $plan = self::entitlement($code)['plan'];
+
+        return Cache::remember("plan_eff_{$code}_{$ver}_" . ($plan->planId ?? 'none'), now()->addMinutes(5), fn () => self::computeEffective($plan));
+    }
+
+    /**
+     * Which plan an account's features come from today, and why. This is the one place that knows about expiry.
+     *
+     *  active    : the subscribed plan, until its end date. A free plan never runs out.
+     *  expired   : a paid plan past its end date. The account falls back to the free starter plan of its account type
+     *              (the paid features stop at once; nothing is deleted and renewing brings them back).
+     *  suspended : the master admin suspended the subscription: no features at all.
+     *  none      : no subscription row (an older account): the free starter plan, so nobody is locked out by a gap.
+     *
+     * @return array{status:string, plan:?UserPlan, subscribed_plan:?UserPlan, subscription:?UserSubscriptions, expires_at:?string}
+     */
+    public static function entitlement(string $code, ?string $role = null): array
+    {
+        $role ??= (string) DB::table('users')->where('code', $code)->value('role_code');
+        $sub = UserSubscriptions::where('code', $code)->where('is_active', 'active')->orderByDesc('id')->first();
+        $subscribed = $sub ? UserPlan::where('planId', $sub->planId)->first() : null;
+        $out = fn (string $status, ?UserPlan $plan, ?string $ends) => [
+            'status' => $status, 'plan' => $plan, 'subscribed_plan' => $subscribed, 'subscription' => $sub, 'expires_at' => $ends,
+        ];
+
+        if ($sub && $subscribed) {
+            $free = (float) $subscribed->price == 0.0;
+            $expired = !$free && $sub->end_date && Carbon::parse($sub->end_date)->isPast();
+
+            return $expired
+                ? $out('expired', self::starterPlan($role), $sub->end_date)
+                : $out('active', $subscribed, $free ? null : $sub->end_date);
+        }
+        if (!$sub) {
+            $last = UserSubscriptions::where('code', $code)->orderByDesc('id')->first();
+            if ($last && $last->is_active === 'cancelled' && Str::startsWith((string) $last->remarks, SubscriptionAdminService::SUSPENDED_TAG)) {
+                return $out('suspended', null, null);
+            }
+        }
+
+        return $out('none', self::starterPlan($role), null);
+    }
+
+    private static function computeEffective(?UserPlan $plan): \Illuminate\Support\Collection
+    {
+        if (!$plan) { return collect(); }
+
+        // a plan inherits the plans below it within its own audience (job seeker vs recruiter ladders are separate)
+        $levels = UserPlan::where('plan_level', '<=', $plan->plan_level)->get()
+            ->filter(fn ($p) => $p->audience === $plan->audience)->pluck('plan_level', 'planId');
+        $rows = UserPlanDetails::whereIn('planId', $levels->keys())->where('recordStatus', 'active')
+            ->whereNotNull('feature_code')->where('feature_code', '<>', '')
+            // features switched off in the master-admin catalog are not offered to anyone
+            ->when(\Illuminate\Support\Facades\Schema::hasTable('subscription_features'), fn ($q) => $q->whereNotIn(
+                'feature_code',
+                \App\Models\AccountPlan\SubscriptionFeature::where('is_active', false)->pluck('feature_code')
+            ))
+            ->get();
+
+        $best = [];   // feature_code => [level, explicit, row]
+        $offer = function (string $featureCode, $value, int $level, int $explicit, $row) use (&$best) {
+            if (!isset($best[$featureCode]) || [$level, $explicit] > [$best[$featureCode][0], $best[$featureCode][1]]) {
+                $best[$featureCode] = [$level, $explicit, $row, $value];
+            }
+        };
+        foreach ($rows as $row) {
+            $level = (int) ($levels[$row->planId] ?? 0);
+            $offer($row->feature_code, $row->feature_value, $level, 1, $row);
+            foreach ((self::IMPLIES[$row->feature_code] ?? []) as $impliedCode => $impliedValue) {
+                $offer($impliedCode, $impliedValue, $level, 0, $row);
+            }
+        }
+
+        return collect($best)->map(function ($b, $featureCode) {
+            [$level, $explicit, $row, $value] = $b;
+            return (object) [
+                'planId' => $row->planId, 'plan_name' => $row->plan_name, 'fid' => $row->fid,
+                'feature_code' => $featureCode, 'feature_name' => $row->feature_name, 'feature_value' => $value,
+                'recordStatus' => 'active', 'is_active' => 'active',
+            ];
+        })->values();
+    }
+
     public static function getFeatureValue(string $code, string $featureCode): mixed
     {
         try {
-
-            return Cache::remember(
-                "feature_{$code}_{$featureCode}",
-                now()->addHour(),
-                function () use ($code, $featureCode) {
-
-                    return DB::table('usersubscription')
-                        ->join(
-                            'usersubscription_details',
-                            'usersubscription.planId',
-                            '=',
-                            'usersubscription_details.planId'
-                        )
-                        ->where('usersubscription.code', $code)
-                        ->where('usersubscription.is_active', 'active')
-                        ->where('usersubscription_details.is_active', 'active')
-                        ->where('usersubscription_details.feature_code', $featureCode)
-                        ->value('usersubscription_details.feature_value');
-                }
-            );
+            return self::effectiveFeatures($code)->firstWhere('feature_code', $featureCode)->feature_value ?? null;
         } catch (\Exception $e) {
             return null;
         }
@@ -216,28 +376,23 @@ class PlanService
             || strtolower((string) $value) === 'unlimited';
     }
 
+    /** true when the plan lifts the application cap (Unlimited Job) */
     public function hasUnlimitedJobApplications(string $code): bool
     {
-        $feature = UserSubscriptionDetails::where('code', $code)
-            ->where('feature_code', 'UNLIMITED_JOB')
-            ->where('is_active', 'active')
-            ->first();
-
-        // No feature found
-        if (!$feature) {
-            return false;
-        }
-
-        // Feature exists and is enabled
-        return strtoupper($feature->feature_value) === 'YES';
+        return strtoupper((string) self::getFeatureValue($code, 'UNLIMITED_JOB')) === 'YES'
+            || strtoupper((string) self::getFeatureValue($code, 'APPLICATION_LIMIT')) === 'UNLIMITED';
     }
 
-
+    /**
+     * The most jobs a user may apply to, or 0 when the plan sets no cap. A cap is set by adding the feature
+     * APPLICATION_LIMIT (a number) to the plan on the Features plan page. (Before, "no cap set" was read as a cap of 0,
+     * which stopped every Free user from applying.)
+     */
     public function getApplicationLimit($code): int
     {
-        return (int) ($this->getFeature($code, 'UNLIMITED_JOB') ?? 0);
+        $v = self::getFeatureValue($code, 'APPLICATION_LIMIT');
+        return is_numeric($v) ? max(0, (int) $v) : 0;
     }
-
     public function getFeature($code, $featureCode)
     {
         $subscription = UserSubscriptions::with('plan.features.feature')
@@ -329,17 +484,11 @@ class PlanService
 
     public static function getAllFeatures($code)
     {
-        $subscription = self::getCurrentPlan($code);
-        if (!$subscription) {
-            return collect();
-        }
-        return UserSubscriptionDetails::where('code', $subscription->code)
-            ->where('is_active', 'active')
-            ->get();
+        return self::effectiveFeatures((string) $code);
     }
-
     public static function clearCache($code)
     {
+        self::bust();
         Cache::forget("plan_feature_{$code}_CONNECTION_LIMIT");
         Cache::forget("plan_features_all_{$code}");
     }

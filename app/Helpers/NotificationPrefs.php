@@ -35,6 +35,8 @@ class NotificationPrefs
         'job_interviews'       => true,    // I was invited to an interview
         'job_status'           => true,    // my application was approved / rejected
         'job_reviews'          => true,    // my application is under review
+        // email (sign-in, activation and password-reset emails are security mail: always sent, never optional)
+        'email_application_updates' => true, // email me when the status of a job application of mine changes
         // appearance: background colour of the navigation bars, "#rrggbb", or null for the standard look
         'nav_color'            => null,
     ];
@@ -42,7 +44,11 @@ class NotificationPrefs
     /** Settings that belong to the notification switches: "restore defaults" resets these and nothing else */
     public const APPEARANCE_KEYS = ['nav_color'];
 
+    /** Email preferences have their own section: "restore defaults" on the notification switches leaves them alone */
+    public const EMAIL_KEYS = ['email_application_updates'];
+
     public const BOOLEAN_KEYS = [
+        'email_application_updates',
         'messages_enabled', 'message_preview', 'unread_badge', 'desktop_notifications', 'toast', 'sound',
         'friend_requests', 'friend_accepts', 'post_reactions', 'post_comments',
         'job_applications', 'job_interviews', 'job_status', 'job_reviews',
@@ -131,7 +137,7 @@ class NotificationPrefs
     {
         if (self::row($userId)) {
             // restore the notification defaults, but keep the appearance choice (the nav colour is not a notification setting)
-            $keep = array_intersect_key(self::decode(self::row($userId)), array_flip(self::APPEARANCE_KEYS));
+            $keep = array_intersect_key(self::decode(self::row($userId)), array_flip(array_merge(self::APPEARANCE_KEYS, self::EMAIL_KEYS)));
             self::write($userId, ['settings' => $keep ? json_encode($keep) : null]);
         }
 
@@ -141,6 +147,17 @@ class NotificationPrefs
     public static function allows(int $userId, string $key): bool
     {
         return (bool) (self::for($userId)[$key] ?? false);
+    }
+
+    /**
+     * May we email the account that owns this `code` for this kind of mail? A missing account (e.g. an applicant
+     * who applied without one) has no preferences, so the email is sent as before.
+     */
+    public static function allowsEmailForCode(?string $code, string $key): bool
+    {
+        $userId = $code ? DB::table('users')->where('code', $code)->value('id') : null;
+
+        return $userId ? self::allows((int) $userId, $key) : true;
     }
 
     /**

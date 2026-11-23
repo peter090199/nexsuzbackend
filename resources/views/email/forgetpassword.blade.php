@@ -32,7 +32,7 @@
         
         <!-- Reset Password Button -->
         <div style="text-align: center; margin-bottom: 20px;">
-            <a href="https://www.nexsuz.com/reset-password/{{ $data['email'] }}/{{ $data['token'] }}"
+            <a href="{{ rtrim(config('app.frontend_url'), '/') }}/reset-password/{{ urlencode($data['email']) }}/{{ $data['token'] }}"
                style="background-color: #28a745; color: white; padding: 12px 24px; text-decoration: none; font-size: 16px; border-radius: 5px; font-weight: bold; display: inline-block;">
                Reset Password
             </a>

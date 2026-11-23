@@ -54,6 +54,21 @@ class RouteServiceProvider extends ServiceProvider
                 ? Limit::perMinute(1000)->by($request->user()->id)
                 : Limit::perMinute(100)->by($request->ip());
         });
+
+        // Master-admin tools. Each has its OWN counter: numeric `throttle:N,M` limits share one counter per user across
+        // every route that uses them, so a few optimize calls would otherwise block the reset (and vice versa).
+        $perAdmin = fn (string $name, int $max, int $minutes) => RateLimiter::for($name, fn (Request $r) =>
+            Limit::perMinutes($minutes, $max)->by($name . '|' . ($r->user()?->id ?: $r->ip())));
+        // public "resend activation email": 3 per 10 minutes for each address + IP, so it cannot be used to spam someone
+        RateLimiter::for('resend-activation', fn (Request $r) =>
+            Limit::perMinutes(10, 3)->by('resend-activation|' . $r->ip() . '|' . strtolower((string) $r->input('email'))));
+        $perAdmin('user-delete', 10, 5);
+        $perAdmin('db-maintain', 10, 1);
+        $perAdmin('db-backup', 5, 1);
+        $perAdmin('db-reset', 3, 5);
+        $perAdmin('email-config', 30, 1);
+        $perAdmin('email-test-connection', 8, 1);
+        $perAdmin('email-test-email', 5, 1);
     }
     
 }

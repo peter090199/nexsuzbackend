@@ -163,8 +163,13 @@ class CommentController extends Controller
     /** Shape a collection of comments with their replies, authors and reactions (a fixed number of queries). */
     private function thread($comments, $me, ?string $postOwner): array
     {
+        $hidden = \App\Services\BlockService::relatedCodes($me);
+        if ($hidden) {
+            $comments = $comments->reject(fn ($c) => in_array((int) $c->code, $hidden, true));
+        }
+
         $uuids = $comments->pluck('comment_uuid')->all();
-        $replies = $uuids ? CommentReply::whereIn('comment_uuid', $uuids)->orderBy('id')->get()->groupBy('comment_uuid') : collect();
+        $replies = $uuids ? \App\Services\BlockService::exclude(CommentReply::whereIn('comment_uuid', $uuids), 'code', $me)->orderBy('id')->get()->groupBy('comment_uuid') : collect();
         $allReplies = $replies->flatten();
 
         $people = $this->people(array_merge($comments->pluck('code')->all(), $allReplies->pluck('code')->all()));
@@ -365,6 +370,11 @@ class CommentController extends Controller
         }
 
         $user = Auth::user();
+
+        $commentAuthor = CommentPost::where('comment_uuid', $request->comment_uuid)->value('code');
+        if (\App\Services\BlockService::isBlocked($user->code, $commentAuthor)) {
+            return $this->fail(\App\Services\BlockService::MESSAGE, 403);
+        }
 
         if ($text !== '' && !$request->hasFile('image')) {
             $duplicate = CommentReply::where('comment_uuid', $request->comment_uuid)->where('code', $user->code)->where('comment', $text)
@@ -605,6 +615,13 @@ class CommentController extends Controller
         }
 
         $me = Auth::user()->code;
+
+        $targetAuthor = $request->target_type === 'reply'
+            ? CommentReply::where('id', $request->target_ref)->value('code')
+            : CommentPost::where('comment_uuid', $request->target_ref)->value('code');
+        if (\App\Services\BlockService::isBlocked($me, $targetAuthor)) {
+            return $this->fail(\App\Services\BlockService::MESSAGE, 403);
+        }
 
         // the UNIQUE (target_type, target_ref, code) key makes this atomic: a repeat click changes, never duplicates
         DB::table('commentreactions')->upsert([[

@@ -55,6 +55,8 @@ return [
     */
 
     'url' => env('APP_URL', 'http://localhost'),
+    // Base URL of the Angular app, used for links in emails (password reset etc.)
+    'frontend_url' => env('FRONTEND_URL', 'https://www.nexsuz.com'),
 
     'asset_url' => env('ASSET_URL', '/'),
 

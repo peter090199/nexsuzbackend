@@ -707,7 +707,7 @@ class PostController extends Controller
             $post = Post::where('posts_uuid', $id)->first();
 
             // If post doesn't exist or user doesn't own the post, return error
-            if (!$post || $post->code !== Auth::user()->code) {
+            if (!$post || (string) $post->code !== (string) Auth::user()->code) {
                 return response()->json([
                     'success' => false,
                     'message' => 'You are not authorized to update this post.',

@@ -47,6 +47,12 @@ class LoginController extends Controller
             // Delete existing tokens before creating a new one
             $user->tokens()->delete();
 
+            // A deactivated account (Settings > Deactivation) comes back the moment its owner signs in again
+            $reactivated = $user->status === 'D';
+            if ($reactivated) {
+                $user->status = 'A';
+            }
+
             // Update user's online status
             $user->is_online = true;
             $user->save();
@@ -71,7 +77,9 @@ class LoginController extends Controller
                     'message'   => 0,
                     'role' => $user->role_code,
                     'is_online' => true,
-                    'has_subscription' => $hasSubscription
+                    'has_subscription' => $hasSubscription,
+                    'reactivated' => $reactivated,
+                    'code' => $user->code
                 ]);
             } else {
                 return response()->json([
@@ -80,7 +88,9 @@ class LoginController extends Controller
                     'message'   => 1,
                     'role' => $user->role_code,
                     'is_online' => true,
-                    'has_subscription' => $hasSubscription
+                    'has_subscription' => $hasSubscription,
+                    'reactivated' => $reactivated,
+                    'code' => $user->code
                 ]);
             }
         }

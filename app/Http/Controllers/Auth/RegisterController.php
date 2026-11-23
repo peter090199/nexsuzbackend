@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Auth;
 use App\Http\Controllers\Controller;
 use Illuminate\Support\Str;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
@@ -66,7 +67,7 @@ class RegisterController extends Controller
                 'role_code' => $request->statuscode == 0 ? 'DEF-USERS' : 'DEF-CLIENT',
             ]);
             // ✅ Automatically assign Free Plan
-            PlanService::activateFreePlan();
+            PlanService::ensureStarterPlan((string) $newCode, $user->role_code);
             // ✅ Create Resource (add default coverphoto)
             Resource::create([
                 'code' => $newCode,
@@ -94,19 +95,18 @@ class RegisterController extends Controller
                 $verificationCode,
             ]);
 
-            // ✅ Send activation email
-            $data = [
-                'fname' => $request->fname,
-                'email' => $request->email,
-                'code' => $verificationCode,
-            ];
-            Mail::to($request->email)->send(new Registeractivation($data));
-
+            // The account is saved first. A mail server problem must not undo a valid registration or show the user a
+            // raw SMTP error: the email is sent after the commit and the user can ask for it again.
             DB::commit();
+
+            $sent = $this->sendActivationEmail($request->fname, $request->email, $verificationCode);
 
             return response()->json([
                 'success' => true,
-                'message' => "You have registered successfully. Please check your email to activate your account.",
+                'email_sent' => $sent,
+                'message' => $sent
+                    ? "You have registered successfully. Please check your email to activate your account."
+                    : "You have registered successfully, but we could not send the activation email right now. Use \"Resend activation email\" on the activation page in a few minutes, or contact support.",
             ], 201);
         } catch (\Throwable $th) {
             DB::rollBack();
@@ -115,6 +115,45 @@ class RegisterController extends Controller
                 'message' => $th->getMessage(),
             ], 500);
         }
+    }
+
+    /** Send the activation email. Never throws: returns false (and logs why, without secrets) when it cannot be sent. */
+    private function sendActivationEmail(string $fname, string $email, string $code): bool
+    {
+        try {
+            Mail::to($email)->send(new Registeractivation(['fname' => $fname, 'email' => $email, 'code' => $code]));
+
+            return true;
+        } catch (\Throwable $e) {
+            Log::warning('Activation email could not be sent', ['to_domain' => substr(strrchr($email, '@') ?: '', 1), 'reason' => mb_substr($e->getMessage(), 0, 200)]);
+
+            return false;
+        }
+    }
+
+    /**
+     * POST resend-activation { email }
+     * Issues a fresh code (the old ones are removed) and emails it. The answer is always the same generic message, so the
+     * endpoint cannot be used to find out which addresses have accounts. Rate limited per address and IP.
+     */
+    public function resendActivation(Request $request)
+    {
+        $data = $request->validate(['email' => 'required|string|email|max:255']);
+        $generic = ['success' => true, 'message' => 'If that address has an account waiting for activation, a new activation email is on its way.'];
+
+        $user = User::where('email', $data['email'])->first();
+        if (!$user || $user->status === 'A') {
+            return response()->json($generic);
+        }
+
+        $code = Str::random(7);
+        DB::transaction(function () use ($user, $code) {
+            DB::table('email_codes')->where('email', $user->email)->delete();
+            DB::insert('INSERT INTO email_codes (email, code) VALUES (?, ?)', [$user->email, $code]);
+        });
+        $this->sendActivationEmail((string) $user->fname, $user->email, $code);
+
+        return response()->json($generic);
     }
 
     public function registerxx(Request $request)

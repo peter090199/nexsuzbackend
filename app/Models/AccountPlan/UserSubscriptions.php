@@ -22,10 +22,19 @@ class UserSubscriptions extends Model
         'start_date',
         'end_date',
         'is_active',
+        'remarks',      // e.g. "Assigned by <admin code>" on an admin plan change
     ];
 
     public function plan()
     {
         return $this->belongsTo(UserPlan::class, 'planId', 'planId');
+    }
+
+    /** plan, feature and subscription changes take effect straight away (everyone's features are recalculated) */
+    protected static function booted()
+    {
+        $bust = fn () => \App\Services\PlanService::bust();
+        static::saved($bust);
+        static::deleted($bust);
     }
 }

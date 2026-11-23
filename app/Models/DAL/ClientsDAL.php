@@ -8,6 +8,7 @@ use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
+use App\Services\BlockService;
 
 use Illuminate\Http\JsonResponse;
 
@@ -75,6 +76,7 @@ class ClientsDAL extends Model
             )
             ->where('users.status', 'A')
             ->where('users.code', '!=', $currentUserCode)
+            ->whereNotIn('users.code', BlockService::relatedCodes($currentUserCode))
             ->where(function ($query) use ($currentUserCode) {
                 $query->where('follows.follower_code', $currentUserCode)
                     ->orWhere('follows.following_code', $currentUserCode);
@@ -248,6 +250,7 @@ class ClientsDAL extends Model
             ->where('follows.following_code', $currentUserCode) // <- YOU are the one being followed
             ->where('follows.follow_status', 'pending')
             ->where('users.status', 'A')
+            ->whereNotIn('users.code', BlockService::relatedCodes($currentUserCode))
             ->get();
 
         return response()->json([
@@ -282,6 +285,7 @@ class ClientsDAL extends Model
                 'follows.following_code'
             )
             ->where('follows.follow_status', '=', 'pending')
+            ->whereNotIn('users.code', BlockService::relatedCodes($currentUserCode))
             ->get();
 
         return response()->json([
@@ -296,6 +300,11 @@ class ClientsDAL extends Model
     public function acceptFollowRequest(string $followerCode)
     {
         $currentUserCode = Auth::user()->code;
+
+        // a blocked account's request can't be accepted (and none should exist: blocking removes them)
+        if (BlockService::isBlocked($currentUserCode, $followerCode)) {
+            return BlockService::denied();
+        }
 
         try {
             // Check if a pending request exists
@@ -377,7 +386,9 @@ class ClientsDAL extends Model
                     s.company,
                     s.industry,
                     s.code,
+                    s.coverphoto,
                     s.is_online,
+                    s.role_code,
                     s.source,
                     COALESCE(f1.id, f2.id) AS id,
                     CASE
@@ -395,13 +406,17 @@ class ClientsDAL extends Model
                         r.company,
                         r.industry,
                         u.code,
+                        u.coverphoto,
                         u.is_online,
+                        u.role_code,
                         'suggested' AS source
                     FROM users u
                     INNER JOIN resources r ON u.code = r.code
                     LEFT JOIN userprofiles up ON u.code = up.code
                     WHERE u.status = 'A'
+                    AND COALESCE(u.role_code, '') NOT IN ('DEF-ADMIN', 'DEF-MASTERADMIN')
                     AND u.code != ?
+                    " . BlockService::sqlNotIn('u.code', $code) . "
                     AND (
                         r.profession = ?
                         OR EXISTS (
@@ -434,6 +449,28 @@ class ClientsDAL extends Model
         }
     }
     
+    /**
+     * Normalise a stored image path/URL to a full URL on the host serving this request.
+     * Handles relative paths, the legacy "/storage/app/public/" prefix and absolute
+     * URLs saved from the old production host (exploredition.com).
+     */
+    private function normalizeImageUrl(?string $path): ?string
+    {
+        if (!$path) {
+            return null;
+        }
+
+        $path = preg_replace('#^https?://(www\.)?exploredition\.com#i', '', $path);
+
+        if (preg_match('#^https?://#i', $path)) {
+            return $path; // some other absolute URL: leave untouched
+        }
+
+        $path = str_replace('/storage/app/public/', '/storage/', $path);
+
+        return url(ltrim($path, '/'));
+    }
+
     public function getPeopleRecentActivity(): JsonResponse
     {
         try {
@@ -448,6 +485,7 @@ class ClientsDAL extends Model
                 r.role_code,
                 r.industry,
                 u.code,
+                u.coverphoto,
                 u.is_online,
                 'history' AS source,
                 COALESCE(f1.id, f2.id) AS id,
@@ -456,7 +494,13 @@ class ClientsDAL extends Model
                         WHEN f1.follow_status = 'pending' THEN 'pending'
                         WHEN f2.follow_status = 'pending' THEN 'connect_back'
                         ELSE 'not_following'
-                    END AS follow_status
+                    END AS follow_status,
+                (
+                    SELECT MAX(ua2.timestamp)
+                    FROM user_activity ua2
+                    WHERE ua2.viewer_code = ?
+                    AND ua2.viewed_code = u.code
+                ) AS last_viewed_at
             FROM users u
             INNER JOIN resources r ON u.code = r.code
             LEFT JOIN userprofiles up ON u.code = up.code
@@ -468,16 +512,22 @@ class ClientsDAL extends Model
             LEFT JOIN follows f2 ON f2.follower_code = u.code AND f2.following_code = ?
 
             WHERE u.status = 'A'
+                AND COALESCE(u.role_code, '') NOT IN ('DEF-ADMIN', 'DEF-MASTERADMIN')
                 AND u.code != ?
+                " . BlockService::sqlNotIn('u.code', $code) . "
                 AND EXISTS (
-                    SELECT 1 
+                    SELECT 1
                     FROM user_activity ua
                     WHERE ua.viewer_code = ?
                     AND ua.viewed_code = u.code
                 )
-            ORDER BY r.fullname ASC
-        ", [$code, $code, $code, $code]);
+            ORDER BY last_viewed_at DESC, r.fullname ASC
+        ", [$code, $code, $code, $code, $code]);
 
+            // Make every photo a URL the browser can load from this server
+            foreach ($results as $row) {
+                $row->photo_pic = $this->normalizeImageUrl($row->photo_pic);
+            }
 
             return response()->json([
                 'success' => true,
@@ -486,6 +536,7 @@ class ClientsDAL extends Model
             ]);
 
         } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('getPeopleRecentActivity failed: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
                 'message' => 'Something went wrong. Please try again later.'

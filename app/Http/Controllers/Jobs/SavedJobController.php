@@ -49,6 +49,7 @@ class SavedJobController extends Controller
                 'saved_jobs.job_id',
                 'saved_jobs.recordstatus',
                 'saved_jobs.created_at',
+                'jobposting.transNo',
                 'jobposting.job_name',
                 'jobposting.company',
                 'jobposting.work_type',
@@ -56,6 +57,18 @@ class SavedJobController extends Controller
                 'jobposting.job_image'
             )
             ->get();
+
+        // image URL for the current host (works on local and production)
+        $jobs->each(function ($j) {
+            if (!$j->job_image) {
+                return;
+            }
+            if (preg_match('#uploads/.+$#', $j->job_image, $m)) {
+                $j->job_image = url('storage/' . $m[0]);
+            } elseif (!preg_match('#^https?://#i', $j->job_image)) {
+                $j->job_image = url(ltrim(str_replace('/storage/app/public/', '/storage/', $j->job_image), '/'));
+            }
+        });
 
         return response()->json([
             'success' => true,

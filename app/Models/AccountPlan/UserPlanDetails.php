@@ -44,4 +44,12 @@ class UserPlanDetails extends Model
             'id'
         );
     }
+
+    /** plan, feature and subscription changes take effect straight away (everyone's features are recalculated) */
+    protected static function booted()
+    {
+        $bust = fn () => \App\Services\PlanService::bust();
+        static::saved($bust);
+        static::deleted($bust);
+    }
 }
