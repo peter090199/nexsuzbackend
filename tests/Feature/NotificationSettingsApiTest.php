@@ -296,8 +296,15 @@ class NotificationSettingsApiTest extends TestCase
     private function activity(User $u): array
     {
         $this->as($u);
+        $res = $this->getJson('/api/activity-notifications')->assertOk()->json();
 
-        return $this->getJson('/api/activity-notifications')->assertOk()->json();
+        // Announcements (written by administrators) have their own tests in AnnouncementApiTest. This file is about the social and job
+        // categories, and the dev database may hold a real published announcement, so those items are set aside here.
+        $isAnnouncement = fn ($i) => $i['type'] === 'announcement';
+        $res['unread_count'] -= count(array_filter($res['data'], fn ($i) => $isAnnouncement($i) && $i['unread']));
+        $res['data'] = array_values(array_filter($res['data'], fn ($i) => !$isAnnouncement($i)));
+
+        return $res;
     }
 
     private function types(array $res): array

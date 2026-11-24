@@ -105,7 +105,46 @@ class PlanCatalogService
             ];
         }
 
-        return ['audience' => $audience, 'plans' => $out];
+        return ['audience' => $audience, 'plans' => $out, 'subscription' => $user ? $this->summary($user, $plans) : null];
+    }
+
+    /**
+     * The signed-in account's own subscription at a glance: plan, status, price, dates, and usage against limits.
+     * Null for accounts that hold no plan (admins).
+     */
+    private function summary(object $user, $plans): ?array
+    {
+        if (!PlanService::roleCanHavePlan($user->role_code)) { return null; }
+        $ent = PlanService::entitlement((string) $user->code, $user->role_code);
+        $sub = $ent['subscription'];
+        $plan = $ent['subscribed_plan'] ?? $ent['plan'];
+        $free = $plan && (float) $plan->price == 0.0;
+
+        return [
+            'status' => strtoupper($ent['status']),                         // ACTIVE | EXPIRED | SUSPENDED | NONE
+            'plan_id' => $plan->planId ?? null,
+            'plan_name' => $plan->plan_name ?? null,
+            'price' => $plan ? (float) $plan->price : 0.0,
+            'is_free' => (bool) $free,
+            'start_date' => $sub->start_date ?? null,
+            'expires_at' => $free ? null : $ent['expires_at'],              // a free plan never expires
+            'features' => $this->featureList($user, $ent['plan']),
+            'usage' => app(SubscriptionAdminService::class)->usageFor((string) $user->code, $ent['plan']->planId ?? null),
+            'can_upgrade' => $plans->contains(fn ($p) => $plan ? $p->plan_level > $plan->plan_level : true),
+        ];
+    }
+
+    /** What the account may use right now (the live, effective features), with limits. */
+    private function featureList(object $user, ?UserPlan $plan): array
+    {
+        $catalog = SubscriptionFeature::all()->keyBy(fn ($f) => strtoupper($f->feature_code));
+        return PlanService::effectiveFeatures((string) $user->code)
+            ->filter(fn ($f) => strtoupper((string) $f->feature_value) !== 'NO')
+            ->map(function ($f) use ($catalog) {
+                $v = strtoupper(trim((string) $f->feature_value));
+                $detail = in_array($v, ['', 'YES'], true) ? '' : ($v === 'UNLIMITED' ? 'Unlimited' : (string) $f->feature_value);
+                return ['key' => $f->feature_code, 'name' => $catalog[strtoupper($f->feature_code)]->name ?? $f->feature_name, 'detail' => $detail];
+            })->values()->all();
     }
 
     /** "Everything in Free" style rows only say a plan inherits; the inheritance itself is computed here. */

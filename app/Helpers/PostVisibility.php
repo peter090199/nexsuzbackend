@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\DB;
  * Who may see a post, react to it and comment on it. Enforced on the server, the UI only mirrors it.
  *
  * posts.status (tinyint, existing column):
- *   0  PRIVATE  only the owner
+ *   0  PRIVATE  only the owner, and administrators (DEF-ADMIN / DEF-MASTERADMIN) when the owner is an administrator too
  *   1  PUBLIC   everyone
  *   2  FRIENDS  the owner and accepted friends
  *
@@ -21,6 +21,22 @@ class PostVisibility
     public const PRIVATE = 0;
     public const PUBLIC  = 1;
     public const FRIENDS = 2;
+
+    public const ADMIN_ROLES = ['DEF-ADMIN', 'DEF-MASTERADMIN'];
+
+    private static function roleOf($code): ?string
+    {
+        return $code === null ? null : DB::table('users')->where('code', $code)->value('role_code');
+    }
+
+    /**
+     * An administrator's private post is shared with the other administrators (it is internal to the admin team).
+     * A job seeker's or recruiter's private post stays theirs alone: administrators do not get to read it.
+     */
+    public static function adminMayView($ownerCode, $viewerCode): bool
+    {
+        return in_array(self::roleOf($ownerCode), self::ADMIN_ROLES, true) && in_array(self::roleOf($viewerCode), self::ADMIN_ROLES, true);
+    }
 
     public static function areFriends($a, $b): bool
     {
@@ -52,7 +68,8 @@ class PostVisibility
         switch ((int) $status) {
             case self::PUBLIC:  return true;
             case self::FRIENDS: return self::areFriends($ownerCode, $viewerCode);
-            default:            return false;              // private (0) and any unknown value
+            case self::PRIVATE: return self::adminMayView($ownerCode, $viewerCode);
+            default:            return false;              // any unknown value
         }
     }
 
@@ -78,6 +95,16 @@ class PostVisibility
             $post = $parent ? DB::table('posts')->where('posts_uuid', $parent)->first(['code', 'status']) : null;
         }
 
+        if (!$post) {
+            // an announcement's own uuid: comments on it are visible exactly when the announcement is
+            $announcement = DB::table('announcements')->where('announcement_uuid', $uuidOrUind)->first();
+            if ($announcement) {
+                $viewer = DB::table('users')->where('code', $viewerCode)->first(['code', 'role_code']);
+
+                return app(\App\Services\AnnouncementService::class)->canView($announcement, $viewer);
+            }
+        }
+
         return $post ? self::canView($post->code, $post->status, $viewerCode) : true;
     }
 
@@ -92,7 +119,10 @@ class PostVisibility
             return [];                                     // nothing of a blocked account's is visible
         }
 
-        return self::areFriends($ownerCode, $viewerCode) ? [self::PUBLIC, self::FRIENDS] : [self::PUBLIC];
+        $allowed = self::areFriends($ownerCode, $viewerCode) ? [self::PUBLIC, self::FRIENDS] : [self::PUBLIC];
+        if (self::adminMayView($ownerCode, $viewerCode)) { $allowed[] = self::PRIVATE; }
+
+        return $allowed;
     }
 
     /** Limit a posts query (Eloquent or DB builder) to what $viewerCode may see on $ownerCode's posts. */

@@ -10,7 +10,7 @@ class SaveFeatureRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return true; // gated by the `masteradmin` route middleware
+        return true; // gated by the `subscriptionadmin` route middleware
     }
 
     protected function prepareForValidation(): void

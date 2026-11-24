@@ -60,6 +60,9 @@ class CommentController extends Controller
         if ($code === null) {
             $code = DB::table('attachmentposts')->where('posts_uuind', $uuidOrUind)->value('code');
         }
+        if ($code === null) {
+            $code = DB::table('announcements')->where('announcement_uuid', $uuidOrUind)->value('code');   // the administrator who wrote it
+        }
 
         return $code === null ? null : (string) $code;
     }

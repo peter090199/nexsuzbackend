@@ -131,9 +131,15 @@ class UserResumeController extends Controller
                 }
             }
         });
-        Storage::disk('local')->delete($row->path);
+        // an application already sent with this CV keeps the file (the recruiter must still be able to read it)
+        $sent = \App\Helpers\StoredCv::applicationsUsing($row->path);
+        if (!$sent) { Storage::disk('local')->delete($row->path); }
 
-        return response()->json(['success' => true, 'message' => 'Resume deleted.', 'data' => $this->listing()]);
+        return response()->json([
+            'success' => true,
+            'message' => $sent ? "Resume deleted. It stays with the {$sent} application" . ($sent === 1 ? '' : 's') . ' you already sent with it.' : 'Resume deleted.',
+            'data' => $this->listing(),
+        ]);
     }
 
     /** the owner's own file: a PDF opens in the browser, a Word file downloads with its own name */

@@ -210,10 +210,10 @@ class UserPlanController extends Controller
 
     public function index(Request $request)
     {
-        // Master admins managing plans can ask for inactive plans too (?all=1).
+        // Admins managing plans (DEF-ADMIN, DEF-MASTERADMIN) can ask for inactive plans too (?all=1).
         $includeInactive = $request->boolean('all')
             && Auth::check()
-            && Auth::user()->role_code === 'DEF-MASTERADMIN';
+            && $this->isAdminUser();
 
         $plans = UserPlan::when(!$includeInactive, fn($q) => $q->where('recordStatus', 'active'))
             ->orderBy('sort_number', 'asc')

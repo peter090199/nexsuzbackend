@@ -478,14 +478,17 @@ class PostController extends Controller
             // Live-update broadcast is best effort: the post is already saved, so an
             // unreachable Pusher (offline, bad certificate...) must not fail the request
             // (the user would otherwise retry and create a duplicate post).
+            // The channel is public, so it only says "something was published": no caption or author, and a private post
+            // is not announced at all. Every client then asks the API what ITS viewer may see.
             try {
-                event(new \App\Events\NewPostCreated([
-                    'transNo' => $newtrans,
-                    'code' => $codeuser,
-                    'caption' => $data['caption'] ?? '',
-                    'created_by' => Auth::user()->fullname,
-                    'created_at' => now(),
-                ]));
+                if ((int) $data['status'] !== PostVisibility::PRIVATE) {
+                    event(new \App\Events\NewPostCreated([
+                        'transNo' => $newtrans,
+                        'code' => $codeuser,
+                        'status' => (int) $data['status'],
+                        'created_at' => now(),
+                    ]));
+                }
             } catch (\Throwable $e) {
                 \Log::warning('NewPostCreated broadcast failed: ' . $e->getMessage());
             }

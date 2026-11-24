@@ -61,6 +61,51 @@ class SubscriptionAdminApiTest extends TestCase
         $this->getJson('/api/subscription-admin/reports')->assertStatus(403);
     }
 
+    /** DEF-ADMIN and DEF-MASTERADMIN manage subscriptions; job seekers, recruiters and guests never do (checked on the API itself). */
+    public function test_admin_and_master_admin_can_manage_subscriptions_and_nobody_else(): void
+    {
+        $mk = fn (string $role) => User::forceCreate(['fname' => $role, 'lname' => 'T', 'fullname' => "$role T", 'role_code' => $role,
+            'email' => strtolower($role) . random_int(1, 999999) . '@example.test', 'password' => bcrypt('pw'), 'status' => 'A', 'code' => random_int(895000, 899999), 'coverphoto' => '']);
+        $who = ['DEF-ADMIN' => $mk('DEF-ADMIN'), 'DEF-MASTERADMIN' => $this->admin, 'DEF-USERS' => $this->member, 'DEF-CLIENT' => $mk('DEF-CLIENT')];
+
+        $reads = ['/api/subscription-admin/features', '/api/subscription-admin/assignments', '/api/subscription-admin/subscribers',
+            '/api/subscription-admin/reports'];
+        // writes sent empty: an allowed role is stopped by validation / 404 (never 401/403); a refused role is stopped at the door
+        $writes = [['post', '/api/account-plan/save'], ['patch', '/api/account-plan/activate/NONE'], ['post', '/api/account-plan/assign'],
+            ['post', '/api/account-plan-details/save'], ['post', '/api/subscription-admin/features'], ['put', '/api/subscription-admin/assignments/NONE'],
+            ['post', '/api/subscription-admin/subscribers/0/extend']];
+
+        foreach ($who as $role => $user) {
+            $allowed = in_array($role, ['DEF-ADMIN', 'DEF-MASTERADMIN'], true);
+            $this->as($user);
+            foreach ($reads as $url) {
+                $status = $this->getJson($url)->getStatusCode();
+                $allowed ? $this->assertNotContains($status, [401, 403], "$role GET $url") : $this->assertSame(403, $status, "$role GET $url");
+            }
+            foreach ($writes as [$m, $url]) {
+                $status = $this->{$m . 'Json'}($url, [])->getStatusCode();
+                $allowed ? $this->assertNotContains($status, [401, 403], "$role $m $url") : $this->assertSame(403, $status, "$role $m $url");
+            }
+        }
+
+        $this->app['auth']->forgetGuards();
+        $this->getJson('/api/subscription-admin/features')->assertStatus(401);
+        $this->postJson('/api/account-plan/save', [])->assertStatus(401);
+    }
+
+    /** the inactive plans a plan manager sees (?all=1) are for both admin roles, not job seekers */
+    public function test_inactive_plans_are_listed_for_both_admin_roles_only(): void
+    {
+        $admin = User::forceCreate(['fname' => 'A', 'lname' => 'T', 'fullname' => 'A T', 'role_code' => 'DEF-ADMIN',
+            'email' => 'adm' . random_int(1, 999999) . '@example.test', 'password' => bcrypt('pw'), 'status' => 'A', 'code' => random_int(895000, 899999), 'coverphoto' => '']);
+        $inactive = fn () => collect($this->getJson('/api/account-plan/list?all=1')->assertOk()->json('data'))->where('recordStatus', '!=', 'active')->count();
+        $total = DB::table('userplanheader')->where('recordStatus', '!=', 'active')->count();
+
+        $this->as($admin);  $this->assertSame($total, $inactive());
+        $this->as($this->admin);  $this->assertSame($total, $inactive());
+        $this->as($this->member);  $this->assertSame(0, $inactive());
+    }
+
     public function test_feature_catalog_create_validates_and_key_is_immutable(): void
     {
         $this->as($this->admin);

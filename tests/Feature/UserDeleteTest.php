@@ -41,9 +41,9 @@ class UserDeleteTest extends TestCase
     protected function tearDown(): void
     {
         $codes = collect($this->u)->pluck('code')->map(fn ($c) => (string) $c);
-        DB::table('usersubscription')->whereIn('code', $codes)->delete();
+        DB::table('usersubscription')->whereIn('code', $codes->merge($codes->map(fn ($c) => 'DELETED-' . $c)))->delete();
         DB::table('usersubscription_details')->whereIn('code', $codes)->delete();
-        foreach ($codes as $c) { File::deleteDirectory(storage_path("app/public/uploads/$c")); }
+        foreach ($codes as $c) { foreach (["app/public/uploads/$c", "app/public/uploads/posts/$c", "app/public/uploads/comments/$c", "app/uploads/$c"] as $p) { File::deleteDirectory(storage_path($p)); } }
         foreach (app(DatabaseAdminService::class)->listBackups() as $b) {
             if (!in_array($b['name'], $this->backupsBefore, true)) { @unlink(DatabaseAdminService::backupDir() . DIRECTORY_SEPARATOR . $b['name']); }
         }
@@ -60,7 +60,7 @@ class UserDeleteTest extends TestCase
     {
         $this->as($by);
         $t = $this->u[$who];
-        return $this->deleteJson("/api/users/{$t->code}", $body + ['password' => 'right-password', 'confirm' => $t->email]);
+        return $this->deleteJson("/api/users/{$t->code}", $body + ['password' => 'right-password', 'confirm' => 'DELETE']);
     }
 
     private function exists(string $who): bool { return DB::table('users')->where('id', $this->u[$who]->id)->exists(); }
@@ -84,26 +84,41 @@ class UserDeleteTest extends TestCase
             $this->as($by);
             $code = $this->u['other']->code;
             $this->getJson("/api/users/$code/delete-preview")->assertStatus(403);
-            $this->deleteJson("/api/users/$code", ['password' => 'right-password', 'confirm' => $this->u['other']->email])->assertStatus(403);
+            $this->deleteJson("/api/users/$code", ['password' => 'right-password', 'confirm' => 'DELETE'])->assertStatus(403);
         }
         $this->assertTrue($this->exists('other'));
         $this->assertSame(count($this->backupsBefore), $this->backupCount());
     }
 
-    public function test_admin_master_admin_and_your_own_account_cannot_be_deleted(): void
+    public function test_only_you_cannot_delete_yourself_and_admins_and_other_masters_can_be_deleted(): void
     {
-        $this->del('admin')->assertStatus(422)->assertJsonPath('message', 'Admin and master admin accounts can\'t be deleted here.');
         $this->del('master')->assertStatus(422)->assertJsonPath('message', 'You can\'t delete your own account.');
-        $this->del('master', [], 'admin');   // an admin is refused by the route before anything else
-        $this->assertTrue($this->exists('admin'));
         $this->assertTrue($this->exists('master'));
         $this->assertSame(count($this->backupsBefore), $this->backupCount());
 
+        // an admin is refused by the route and by the service
+        $this->del('seeker', [], 'admin')->assertStatus(403);
+        $this->assertTrue($this->exists('seeker'));
+
+        // a master admin may delete an admin and another master admin
         $this->as('master');
-        $this->getJson("/api/users/{$this->u['admin']->code}/delete-preview")->assertOk()
-            ->assertJsonPath('data.can_delete', false)->assertJsonPath('data.reason', 'Admin and master admin accounts can\'t be deleted here.');
+        $this->getJson("/api/users/{$this->u['admin']->code}/delete-preview")->assertOk()->assertJsonPath('data.can_delete', true);
+        $this->del('admin')->assertOk();
+        $this->assertFalse($this->exists('admin'));
+
+        $other = User::forceCreate(['fname' => 'm2', 'lname' => 'T', 'fullname' => 'm2 T', 'role_code' => 'DEF-MASTERADMIN', 'email' => 'm2' . random_int(1, 99999) . '@example.test',
+            'password' => bcrypt('pw'), 'status' => 'A', 'code' => 899123, 'coverphoto' => '']);
+        $this->u['m2'] = $other;
+        $this->del('m2')->assertOk();
+        $this->assertFalse($this->exists('m2'));
     }
 
+    public function test_the_last_active_master_admin_is_protected(): void
+    {
+        DB::table('users')->where('role_code', 'DEF-MASTERADMIN')->where('id', '!=', $this->u['master']->id)->update(['status' => 'I']);   // rolled back
+        $actor = (object) ['code' => 'x', 'role_code' => 'DEF-MASTERADMIN'];
+        $this->assertSame('The last active master admin can\'t be deleted.', app(\App\Services\UserDeletionService::class)->blocker($this->u['master'], $actor));
+    }
     public function test_unknown_account_is_404(): void
     {
         $this->as('master');
@@ -118,8 +133,8 @@ class UserDeleteTest extends TestCase
         $this->giveData('seeker');
 
         $this->del('seeker', ['password' => 'wrong'])->assertStatus(422)->assertJsonPath('message', 'Your password is incorrect.');
-        $this->del('seeker', ['confirm' => 'someone-else@example.test'])->assertStatus(422)
-            ->assertJsonPath('message', 'Type the account\'s email address exactly to confirm.');
+        $this->del('seeker', ['confirm' => 'delete me'])->assertStatus(422)
+            ->assertJsonPath('message', 'Type DELETE exactly to confirm.');
         $this->as('master');
         $this->deleteJson("/api/users/{$this->u['seeker']->code}", [])->assertStatus(422);
 
@@ -164,7 +179,15 @@ class UserDeleteTest extends TestCase
         // gone
         $c = (string) $this->u['seeker']->code;
         $this->assertFalse($this->exists('seeker'));
+        // financial rows are kept but no longer point at the person
         $this->assertSame(0, DB::table('usersubscription')->where('code', $c)->count());
+        $this->assertSame(1, DB::table('usersubscription')->where('code', 'DELETED-' . $c)->count());
+        $this->assertSame(0, DB::table('usersubscription_details')->where('code', $c)->count());
+        // the audit trail
+        $audit = DB::table('user_deletion_audits')->where('target_code', $c)->first();
+        $this->assertSame('completed', $audit->status);
+        $this->assertSame((string) $this->u['master']->code, $audit->deleted_by_code);
+        $this->assertStringNotContainsString($this->u['seeker']->email, (string) $audit->target_email_masked);
         $this->assertSame(0, DB::table('follows')->where('follower_code', $c)->count());
         $this->assertSame(0, DB::table('messages')->where('sender_id', $this->u['seeker']->id)->count());
         $this->assertSame(0, DB::table('personal_access_tokens')->where('tokenable_id', $this->u['seeker']->id)->count());
@@ -199,20 +222,21 @@ class UserDeleteTest extends TestCase
         $this->assertSame($first['name'], $second['name'], 'deleting a second account within 10 minutes reuses the backup');
     }
 
-    public function test_uploaded_files_are_only_removed_when_asked(): void
+    public function test_the_accounts_own_files_are_removed_on_every_local_disk_and_nobody_elses(): void
     {
-        $dir = storage_path('app/public/uploads/' . $this->u['seeker']->code);
-        File::ensureDirectoryExists($dir);
-        file_put_contents($dir . '/cv.pdf', 'x');
-        $dir2 = storage_path('app/public/uploads/' . $this->u['other']->code);
-        File::ensureDirectoryExists($dir2);
-        file_put_contents($dir2 . '/cv.pdf', 'x');
+        $mk = function (string $rel) { $d = storage_path($rel); File::ensureDirectoryExists($d); file_put_contents("$d/f.bin", 'x'); return $d; };
+        $s = $this->u['seeker']->code; $o = $this->u['other']->code;
+        $mine = [$mk("app/public/uploads/$s/cvphoto"), $mk("app/public/uploads/posts/$s/u1"), $mk("app/uploads/$s/resumes"), $mk("app/public/uploads/comments/$s")];
+        $theirs = [$mk("app/public/uploads/$o"), $mk("app/public/uploads/posts/$o/u1")];
 
-        $this->del('seeker')->assertOk()->assertJsonPath('data.files', 0);
-        $this->assertDirectoryExists($dir, 'files are kept unless delete_files is set');
-
-        $this->del('other', ['delete_files' => true])->assertOk()->assertJsonPath('data.files', 1);
-        $this->assertDirectoryDoesNotExist($dir2);
+        $r = $this->del('seeker')->assertOk();
+        $this->assertGreaterThan(0, $r->json('data.files'));
+        foreach ($mine as $d) { $this->assertDirectoryDoesNotExist($d); }
+        foreach ($theirs as $d) { $this->assertDirectoryExists($d); }
+        $this->assertSame(1, (int) DB::table('user_deletion_audits')->where('target_code', (string) $s)->where('files_deleted', '>', 0)->count());
+        File::deleteDirectory(storage_path("app/public/uploads/posts/$o"));
+        File::deleteDirectory(storage_path("app/public/uploads/comments/$s"));
+        File::deleteDirectory(storage_path("app/uploads/$s"));
     }
 
     public function test_deleting_is_rate_limited(): void

@@ -134,27 +134,58 @@ class AppliedJobController extends Controller
             // the recruiter can switch the CV off; old jobs keep requiring it
             $cvRule = ($job->allow_cv === null || (int) $job->allow_cv === 1) ? 'required' : 'nullable';
 
-            // Settings > Resume / CV: with no file uploaded, the applicant's default resume can be used instead
-            $defaultResume = (!$request->hasFile('resume_pdf') && $request->boolean('use_default_resume'))
-                ? \App\Http\Controllers\Auth\UserResumeController::defaultFor($user->code)
-                : null;
-            if ($defaultResume && (strtolower(pathinfo($defaultResume->path, PATHINFO_EXTENSION)) !== 'pdf'
-                || !\Illuminate\Support\Facades\Storage::disk('local')->exists($defaultResume->path))) {
-                $defaultResume = null;      // not a PDF, or the stored file is gone: fall back to requiring an upload
+            // Settings > Resume / CV: exactly ONE CV goes with an application: one of the applicant's own saved CVs (resume_id;
+            // use_default_resume = "my default one"), or a new PDF uploaded here. Never both.
+            $hasUpload = $request->hasFile('resume_pdf');
+            $chosenId = $request->filled('resume_id') ? $request->input('resume_id') : null;
+            if ($hasUpload && ($chosenId !== null || $request->boolean('use_default_resume'))) {
+                throw \Illuminate\Validation\ValidationException::withMessages(['resume_id' => ['Choose one CV: one of your saved CVs or a new PDF, not both.']]);
             }
-            if ($defaultResume) { $cvRule = 'nullable'; }
+            $selectedResume = null;
+            if ($chosenId !== null) {
+                // the same answer for a CV that is somebody else's and one that does not exist: it is not yours to use
+                $selectedResume = ctype_digit((string) $chosenId)
+                    ? DB::table('user_resumes')->where('id', (int) $chosenId)->where('code', $user->code)->first()
+                    : null;
+                if (!$selectedResume) {
+                    throw \Illuminate\Validation\ValidationException::withMessages(['resume_id' => ['Choose one of your own saved CVs.']]);
+                }
+            } elseif (!$hasUpload && $request->boolean('use_default_resume')) {
+                $selectedResume = \App\Http\Controllers\Auth\UserResumeController::defaultFor($user->code);
+            }
+            if ($selectedResume && (strtolower(pathinfo($selectedResume->path, PATHINFO_EXTENSION)) !== 'pdf'
+                || !\Illuminate\Support\Facades\Storage::disk('local')->exists($selectedResume->path))) {
+                if ($chosenId !== null) {
+                    throw \Illuminate\Validation\ValidationException::withMessages(['resume_id' => ['That CV can\'t be sent: only a PDF that is still saved can go with an application.']]);
+                }
+                $selectedResume = null;      // the default is not a PDF, or its file is gone: fall back to requiring an upload
+            }
+            if ($selectedResume) { $cvRule = 'nullable'; }
 
             $validated = $request->validate([
                 'job_name'      => 'required|string|max:255',
                 'email'         => 'required|email|max:255',
-                'country_code'  => 'required|string|max:10',
-                'phone_number'  => 'required|string|max:20',
+                // the country code and the number must match: the code on its own ("63", "+63", "1-242"), the number without it
+                'country_code'  => ['required', 'string', 'max:10', 'regex:/^\+?\d{1,4}(-\d{1,4})?$/'],
+                'phone_number'  => ['required', 'string', 'max:20', function ($attribute, $value, $fail) use ($request) {
+                    $value = trim((string) $value);
+                    if (str_starts_with($value, '+')) {
+                        $fail('Enter the phone number without the country code: choose the code in the list.');
+                        return;
+                    }
+                    $digits = preg_replace('/\D/', '', $value);
+                    $dial = preg_replace('/\D/', '', (string) $request->input('country_code'));
+                    // digits, spaces and common separators only; 4 to 15 digits in all, as an international number (E.164) allows
+                    if (!preg_match('/^[0-9\s\-().]+$/', $value) || strlen($digits) < 4 || strlen($digits) + strlen($dial) > 15) {
+                        $fail('Enter a valid phone number for the selected country code.');
+                    }
+                }],
                 'transNo'       => 'required|string|max:50',
                 'resume_pdf'    => $cvRule . '|file|mimes:pdf|max:5120',
                 'answers'       => 'nullable|array',
                 'answers.*.question_id' => 'required|integer',
                 'answers.*.answer_text' => 'nullable|string',
-            ]);
+            ], ['resume_pdf.required' => 'Select one of your saved CVs or upload a PDF.', 'country_code.regex' => 'Choose a valid country code.']);
 
             // ---- the recruiter's application settings, enforced here (the screen only mirrors them) ----
             if ($job->application_deadline && now()->startOfDay()->gt(\Carbon\Carbon::parse($job->application_deadline))) {
@@ -232,11 +263,10 @@ class AppliedJobController extends Controller
                 // PRIVATE disk: a CV is personal data. It is only ever served to the job's recruiter through
                 // CandidateReviewController::resume (authenticated), never by a public URL.
                 $resumePath = $file->storeAs($folder, $filename, 'local');
-            } elseif ($defaultResume && ((int) ($job->allow_cv ?? 1) === 1)) {
-                // a copy, so deleting or replacing the account resume later never changes what the recruiter already received
-                $folder = "uploads/{$user->code}/AppliedJobsResume";
-                $resumePath = $folder . '/' . Str::uuid() . '.pdf';
-                \Illuminate\Support\Facades\Storage::disk('local')->copy($defaultResume->path, $resumePath);
+            } elseif ($selectedResume && ((int) ($job->allow_cv ?? 1) === 1)) {
+                // the saved CV's own file is used: nothing is uploaded or copied again. The application points at it (user_resume_id), and
+                // the file stays for as long as an application uses it, even if the saved CV is deleted later (see App\Helpers\StoredCv)
+                $resumePath = $selectedResume->path;
             }
 
             /*
@@ -266,6 +296,7 @@ class AppliedJobController extends Controller
                 AppliedResumes::create([
                     'transNo'       => $validated['transNo'],
                     'resume_pdf'    => $resumePath, // save relative path only
+                    'user_resume_id' => ($selectedResume && $resumePath === $selectedResume->path) ? (int) $selectedResume->id : null,   // which saved CV, when one was chosen
                     'job_name'      => $validated['job_name'],
                     'role_code'     => $user->role_code,
                     'code'          => $user->code,

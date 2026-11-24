@@ -11,6 +11,7 @@ use App\Models\AccountPlan\UserPlan;
 use App\Models\GeneratesTransNo\ControllNumbers;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 use Illuminate\Support\Str;
 use App\Models\AccountPlan\UserSubscriptionsDetails;
@@ -65,11 +66,19 @@ class PlanService
         try {
             $role ??= DB::table('users')->where('code', $code)->value('role_code');
             if (!self::roleCanHavePlan($role)) { return null; }
-            if (UserSubscriptions::where('code', $code)->where('is_active', 'active')->exists()) { return null; }
-            $plan = self::starterPlan($role);
-            if (!$plan) { return null; }
-            return self::subscribeUser($code, $plan->planId, 'Free');
-        } catch (Throwable $e) {
+            // nested transaction = savepoint: a failure here rolls back only the plan, never the caller's registration
+            return DB::transaction(function () use ($code, $role) {
+                // serialise concurrent calls for the same account (repeated requests) on its user row
+                DB::table('users')->where('code', $code)->lockForUpdate()->value('code');
+                // any active OR suspended/cancelled-by-admin subscription is respected: never duplicate or override
+                if (UserSubscriptions::where('code', $code)->where('is_active', 'active')->exists()) { return null; }
+                $last = UserSubscriptions::where('code', $code)->orderByDesc('id')->first();
+                if ($last && $last->is_active === 'cancelled' && Str::startsWith((string) $last->remarks, SubscriptionAdminService::SUSPENDED_TAG)) { return null; }
+                $plan = self::starterPlan($role);
+                if (!$plan) { return null; }
+                return self::subscribeUser($code, $plan->planId, 'Free');
+            });
+        } catch (\Throwable $e) {
             Log::warning('Starter plan not activated: ' . $e->getMessage());
             return null;
         }

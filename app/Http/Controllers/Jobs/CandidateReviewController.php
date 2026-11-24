@@ -296,7 +296,8 @@ class CandidateReviewController extends Controller
 
         // the CV files go too (private or the older public location)
         foreach ($files as $stored) {
-            if ($stored && preg_match('#uploads/.+$#', $stored, $m) && !str_contains($stored, '..')) {
+            // a file that is still the applicant's saved CV, or attached to another application, is not removed
+            if ($stored && preg_match('#uploads/.+$#', $stored, $m) && !str_contains($stored, '..') && !\App\Helpers\StoredCv::inUse($stored)) {
                 foreach (['local', 'public'] as $disk) { Storage::disk($disk)->delete($m[0]); }
             }
         }

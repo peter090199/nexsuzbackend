@@ -184,7 +184,12 @@ class RoleController extends Controller
         
                 // Fetch the role to be updated
                 $role = Role::findOrFail($id);
-        
+
+                if (\App\Services\SecurityManagementService::isSystemRole($role->rolecode) && $role->rolecode !== $request->rolecode) {
+                    DB::rollBack();
+                    return response()->json(['success' => false, 'message' => "{$role->rolecode} is a system role and can't be renamed."]);
+                }
+
                 // Check for associations before updating
                 $usersCount = User::where('role_code', $role->rolecode)->count();
                 $roleaccessmenu = Roleaccessmenu::where('rolecode', $role->rolecode)->count();
@@ -265,6 +270,10 @@ class RoleController extends Controller
         
                 $role = Role::where('id', $id)->first(); 
         
+                if ($role && \App\Services\SecurityManagementService::isSystemRole($role->rolecode)) {
+                    DB::rollBack();
+                    return response()->json(['success' => false, 'message' => "{$role->rolecode} is a system role and can't be deleted."]);
+                }
                 if ($role) {
                     $usersCount = User::where('role_code', $role->rolecode)->count();
                     $roleaccessmenu = Roleaccessmenu::where('rolecode',$role->rolecode)->count();

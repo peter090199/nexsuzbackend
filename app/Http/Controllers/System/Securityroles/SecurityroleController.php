@@ -393,6 +393,7 @@ class SecurityroleController extends Controller
             }
 
             DB::commit();
+            \App\Services\SecurityManagementService::forgetMenuCache(...array_unique(array_column($header, 'rolecode')));   // the sidebar re-reads it at once
 
             return response()->json([
                 'success' => true,

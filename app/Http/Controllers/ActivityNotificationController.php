@@ -127,6 +127,16 @@ class ActivityNotificationController extends Controller
                 ]));
         }
 
+        // ---- announcements: every live one, for job seekers and recruiters (administrators wrote them, they are not notified of them)
+        if ($prefs['announcements'] && !in_array(Auth::user()->role_code, \App\Services\AnnouncementService::ADMIN_ROLES, true)) {
+            \App\Services\AnnouncementService::liveQuery()->where('published_at', '>=', $since)->orderByDesc('published_at')->limit(self::PER_CATEGORY)
+                ->get(['id', 'code', 'title', 'published_at'])
+                ->each(fn ($r) => $items->push([
+                    'id' => 'an-' . $r->id, 'type' => 'announcement', 'actor_code' => $r->code,
+                    'text' => 'published an announcement', 'excerpt' => $this->excerpt($r->title), 'created_at' => $r->published_at,
+                ]));
+        }
+
         // ---- jobs (read from applied_jobs / jobPosting; updated_at moves when the status changes) ----
         if ($prefs['job_applications']) {
             DB::table('applied_jobs as aj')->join('jobPosting as jp', 'aj.transNo', '=', 'jp.transNo')

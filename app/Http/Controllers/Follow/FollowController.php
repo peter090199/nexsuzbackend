@@ -322,7 +322,7 @@ class FollowController extends Controller
                     f1.follower_code IS NOT NULL
                     OR f2.following_code IS NOT NULL
                     OR p.code = ?
-                    OR (p.status = 1 AND u.role_code = 'DEF-MASTERADMIN') 
+                    OR (p.status = 1 AND u.role_code IN ('DEF-ADMIN', 'DEF-MASTERADMIN')) 
                 )
                 " . \App\Services\BlockService::sqlNotIn('p.code', $currentUserCode) . "
                 ORDER BY p.created_at DESC

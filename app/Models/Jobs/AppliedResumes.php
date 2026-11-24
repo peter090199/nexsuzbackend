@@ -14,6 +14,7 @@ class AppliedResumes extends Model
     protected $fillable = [
         'transNo',
         'resume_pdf',
+        'user_resume_id',
         'job_name',
         'role_code',
         'code',

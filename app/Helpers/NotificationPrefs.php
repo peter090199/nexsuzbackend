@@ -30,6 +30,7 @@ class NotificationPrefs
         'friend_accepts'       => true,
         'post_reactions'       => true,
         'post_comments'        => true,
+        'announcements'        => true,    // an administrator published an announcement
         // jobs
         'job_applications'     => true,    // someone applied to my job posting
         'job_interviews'       => true,    // I was invited to an interview
@@ -50,7 +51,7 @@ class NotificationPrefs
     public const BOOLEAN_KEYS = [
         'email_application_updates',
         'messages_enabled', 'message_preview', 'unread_badge', 'desktop_notifications', 'toast', 'sound',
-        'friend_requests', 'friend_accepts', 'post_reactions', 'post_comments',
+        'friend_requests', 'friend_accepts', 'post_reactions', 'post_comments', 'announcements',
         'job_applications', 'job_interviews', 'job_status', 'job_reviews',
     ];
 
@@ -60,6 +61,7 @@ class NotificationPrefs
         'friend_accept'  => 'friend_accepts',
         'reaction'       => 'post_reactions',
         'comment'        => 'post_comments',
+        'announcement'   => 'announcements',
         'job_application' => 'job_applications',
         'job_interview'  => 'job_interviews',
         'job_status'     => 'job_status',

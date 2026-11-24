@@ -22,8 +22,9 @@ class RecruitmentReportController extends Controller
     public function index(Request $request)
     {
         $me = Auth::user();
-        if (!in_array($me->role_code, ['DEF-CLIENT', 'DEF-MASTERADMIN'], true)) {
-            return response()->json(['success' => false, 'message' => 'Reports are for recruiters.'], 403);
+        // recruiters, and the admin roles (they have no vacancies of their own, so their report is simply empty)
+        if (!in_array($me->role_code, ['DEF-CLIENT', 'DEF-ADMIN', 'DEF-MASTERADMIN'], true)) {
+            return response()->json(['success' => false, 'message' => 'Reports are for recruiters and administrators.'], 403);
         }
 
         $v = $request->validate([

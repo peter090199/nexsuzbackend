@@ -14,6 +14,7 @@
     use App\Http\Controllers\Accessrolemenu\AccessrolemenuController;
     use App\Http\Controllers\System\Menus\MenuController;
     use App\Http\Controllers\System\Securityroles\SecurityroleController;
+    use App\Http\Controllers\System\Securityroles\SecurityAdminController;
     use App\Http\Controllers\System\Roles\RoleController;
     use App\Http\Controllers\SearchAccount\UserController;
     use App\Http\Controllers\Select2\SelectController;
@@ -102,8 +103,9 @@
         });
         //accessmenu
         Route::Resource('accessmenu', AccessrolemenuController::class)->names('accessmenu');
-        Route::post('saveAccessMenu', [SecurityroleController::class, 'saveAccessMenu']);
-        Route::delete('deleteMenu', [SecurityroleController::class, 'deleteMenu']);
+        // changing what a role can open: DEF-MASTERADMIN only (these two used to accept any signed-in user)
+        Route::post('saveAccessMenu', [SecurityroleController::class, 'saveAccessMenu'])->middleware('masteradmin');
+        Route::delete('deleteMenu', [SecurityroleController::class, 'deleteMenu'])->middleware('masteradmin');
         // Route::get('getModule', [AccessrolemenuController::class, 'getModule']);
         Route::post('logout', [LoginController::class, 'logout'])->name('logout');
         // Settings > Account Information: administrators edit their own name, email, profession, company, website
@@ -124,6 +126,10 @@
         Route::get('getUsers', [AppUsersController::class, 'getUsers']);
         // admin dashboards (DEF-ADMIN and DEF-MASTERADMIN; the controller scopes the data by role)
         Route::get('admin/dashboard-stats', [\App\Http\Controllers\System\AdminDashboardController::class, 'stats']);
+        // add a DEF-ADMIN account (master admin only; the role is fixed server-side)
+        Route::post('users/admin', [AppUsersController::class, 'storeAdmin'])->middleware(['masteradmin', 'throttle:20,1']);
+        // edit an account's contact details (master admin only; role / status / password cannot be changed here)
+        Route::patch('users/{code}', [AppUsersController::class, 'update'])->middleware('masteradmin');
         Route::patch('users/{code}/status', [AppUsersController::class, 'setStatus'])->middleware('masteradmin');
         // delete one account and everything it created (master admin only; password + typed email + backup first)
         Route::get('users/{code}/delete-preview', [AppUsersController::class, 'deletePreview'])->middleware('masteradmin');
@@ -148,6 +154,20 @@
         Route::delete('deleteSubmenu/{id}', [Submenus::class, 'deleteSubmenu']);
         Route::post('saveSubmenus', [Submenus::class, 'saveSubmenus']);
         Route::put('updateSubmenuById/{id}', [Submenus::class, 'updateSubmenuById']);
+        // ROLE & PERMISSION MANAGEMENT (DEF-MASTERADMIN only; rules + audit in SecurityManagementService)
+        Route::prefix('security-admin')->middleware('masteradmin')->group(function () {
+            Route::get('/stats', [SecurityAdminController::class, 'stats']);
+            Route::get('/roles', [SecurityAdminController::class, 'roles']);
+            Route::post('/roles', [SecurityAdminController::class, 'storeRole']);
+            Route::put('/roles/{id}', [SecurityAdminController::class, 'updateRole']);
+            Route::delete('/roles/{id}', [SecurityAdminController::class, 'destroyRole']);
+            Route::get('/roles/{id}/permissions', [SecurityAdminController::class, 'permissions']);
+            Route::put('/roles/{id}/permissions', [SecurityAdminController::class, 'savePermissions']);
+            Route::get('/users', [SecurityAdminController::class, 'users']);
+            Route::post('/users/assign', [SecurityAdminController::class, 'assign']);
+            Route::delete('/users/{code}/role', [SecurityAdminController::class, 'removeRole']);
+            Route::get('/audit', [SecurityAdminController::class, 'audit']);
+        });
         // Security roles
         Route::Resource('security', SecurityroleController::class)->names('security');
         //Role
@@ -212,6 +232,17 @@
         Route::resource('follow', FollowController::class)->except(['update'])->names('follow');
         Route::put('follow/{follow}', [FollowController::class, 'update'])->name('follow.update')->middleware('planfeature:NETWORK_FEED');
         Route::get('getPost', [FollowController::class, 'getPost']);
+
+        // GLOBAL ANNOUNCEMENTS: written by DEF-ADMIN / DEF-MASTERADMIN, read by everybody signed in (rules in AnnouncementService)
+        Route::get('announcements', [\App\Http\Controllers\AnnouncementController::class, 'feed']);
+        Route::get('announcements/manage', [\App\Http\Controllers\AnnouncementController::class, 'manage']);
+        Route::get('announcements/{id}', [\App\Http\Controllers\AnnouncementController::class, 'show'])->whereNumber('id');
+        Route::post('announcements', [\App\Http\Controllers\AnnouncementController::class, 'store'])->middleware('throttle:30,1');
+        Route::post('announcements/{id}/update', [\App\Http\Controllers\AnnouncementController::class, 'update'])->whereNumber('id')->middleware('throttle:60,1');
+        Route::post('announcements/{id}/status', [\App\Http\Controllers\AnnouncementController::class, 'setStatus'])->whereNumber('id');
+        Route::delete('announcements/{id}', [\App\Http\Controllers\AnnouncementController::class, 'destroy'])->whereNumber('id');
+        Route::post('announcements/{id}/react', [\App\Http\Controllers\AnnouncementController::class, 'react'])->whereNumber('id')->middleware('planfeature:NETWORK_FEED');   // same plan rule as reacting to a post
+        Route::delete('announcements/{id}/react', [\App\Http\Controllers\AnnouncementController::class, 'unreact'])->whereNumber('id');
         Route::get('posts/followed', [FollowController::class, 'getFollowedPosts']);
 
         // Route::post('/post-attachment/{id}', [PostController::class, 'deleteIndividualPost']);
@@ -391,8 +422,8 @@
             Route::post('/upgrade', [UserPlanController::class, 'upgrade']);
             Route::post('/free-plan', [PlanService::class, 'activateFreePlan']);
 
-            // Plan management: DEF-MASTERADMIN only (enforced server-side)
-            Route::middleware('masteradmin')->group(function () {
+            // Plan management: DEF-ADMIN and DEF-MASTERADMIN (enforced server-side)
+            Route::middleware('subscriptionadmin')->group(function () {
                 Route::post('/save', [UserPlanController::class, 'save']);
                 Route::put('/update/{id}', [UserPlanController::class, 'update']);
                 Route::delete('/delete/{id}', [UserPlanController::class, 'destroy']);
@@ -404,8 +435,8 @@
             });
         });
 
-        // SUBSCRIPTION MANAGEMENT (DEF-MASTERADMIN only). Plans themselves use the account-plan routes above.
-        Route::prefix('subscription-admin')->middleware('masteradmin')->group(function () {
+        // SUBSCRIPTION MANAGEMENT (DEF-ADMIN and DEF-MASTERADMIN). Plans themselves use the account-plan routes above.
+        Route::prefix('subscription-admin')->middleware('subscriptionadmin')->group(function () {
             Route::get('/features', [SubFeatureController::class, 'index']);
             Route::post('/features', [SubFeatureController::class, 'store']);
             Route::put('/features/{id}', [SubFeatureController::class, 'update']);
@@ -454,7 +485,7 @@
             Route::get('/getByPlan/{planId}', [UserPlanDetailsController::class, 'getByPlan']);
             Route::get('/my-plan-features', [UserPlanController::class, 'myFeatures']);
 
-            Route::middleware('masteradmin')->group(function () {
+            Route::middleware('subscriptionadmin')->group(function () {
                 Route::post('/save', [UserPlanDetailsController::class, 'save']);
                 Route::put('/update/{id}', [UserPlanDetailsController::class, 'update']);
                 Route::delete('/delete/{id}', [UserPlanDetailsController::class, 'delete']);
@@ -463,9 +494,3 @@
     });
 
 
-    // Route::post(
-    //     '/resume/upload',
-    //     [ResumeController::class, 'upload']
-    // )->middleware(
-    //     'planfeature:UPLOAD_RESUME'
-    // );

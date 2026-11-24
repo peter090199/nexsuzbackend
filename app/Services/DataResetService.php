@@ -52,6 +52,11 @@ class DataResetService
         // content that hangs off the doomed accounts' posts / jobs / applications
         $postRows = $this->pluckRows('posts', fn ($q) => $q->whereIn('code', $codes), ['id', 'posts_uuid']);
         $postUuids = array_column($postRows, 'posts_uuid'); $postIds = array_column($postRows, 'id');
+        // announcements written by these accounts: their comments and reactions hang off the announcement's uuid / negative id
+        $annRows = $this->pluckRows('announcements', fn ($q) => $q->whereIn('code', $codes), ['id', 'announcement_uuid']);
+        $annIds = array_column($annRows, 'id');
+        $postUuids = array_merge($postUuids, array_column($annRows, 'announcement_uuid'));
+        $reactionPostIds = array_merge($postIds, array_map(fn ($i) => -$i, $annIds));
 
         $commentUuids = array_column($this->pluckRows('commentposts',
             fn ($q) => $q->whereIn('code', $codes)->orWhereIn('post_uuidOrUind', $postUuids), ['comment_uuid']), 'comment_uuid');
@@ -87,10 +92,12 @@ class DataResetService
             $S('Posts & feed', 'Comment reactions', 'commentreactions', fn ($q) => $q->whereIn('code', $codes)->orWhereIn('target_ref', $reactionTargets)),
             $S('Posts & feed', 'Comment replies', 'commentreplies', fn ($q) => $q->whereIn('code', $codes)->orWhereIn('comment_uuid', $commentUuids)),
             $S('Posts & feed', 'Comments', 'commentposts', fn ($q) => $q->whereIn('code', $codes)->orWhereIn('post_uuidOrUind', $postUuids)),
-            $S('Posts & feed', 'Post reactions', 'reactionpost', fn ($q) => $q->whereIn('code', $codes)->orWhereIn('post_id', $postIds)),
+            $S('Posts & feed', 'Post reactions', 'reactionpost', fn ($q) => $q->whereIn('code', $codes)->orWhereIn('post_id', $reactionPostIds)),
             $S('Posts & feed', 'Reactions', 'reactions', fn ($q) => $q->whereIn('code', $codes)->orWhereIn('post_uuidOrUind', $postUuids)),
             $S('Posts & feed', 'Post attachments', 'attachmentposts', fn ($q) => $q->whereIn('code', $codes)->orWhereIn('posts_uuid', $postUuids)),
             $S('Posts & feed', 'Posts', 'posts', fn ($q) => $q->whereIn('code', $codes)),
+            $S('Posts & feed', 'Announcement attachments', 'announcement_attachments', fn ($q) => $q->whereIn('announcement_id', $annIds)),
+            $S('Posts & feed', 'Announcements', 'announcements', fn ($q) => $q->whereIn('code', $codes)),
 
             // --- messaging & network
             $S('Messaging & network', 'Messages', 'messages', fn ($q) => $q->whereIn('sender_id', $ids)->orWhereIn('receiver_id', $ids)),
@@ -109,6 +116,7 @@ class DataResetService
             $S('Profiles & CV', 'Skills', 'userskills', fn ($q) => $q->whereIn('code', $codes)),
             $S('Profiles & CV', 'Trainings', 'usertrainings', fn ($q) => $q->whereIn('code', $codes)),
             $S('Profiles & CV', 'Resource profiles', 'resources', fn ($q) => $q->whereIn('code', $codes)),
+            $S('Profiles & CV', 'Uploaded CVs', 'user_resumes', fn ($q) => $q->whereIn('code', $codes)),
 
             // --- subscriptions
             $S('Subscriptions', 'Subscription features', 'usersubscription_details', fn ($q) => $q->whereIn('code', $codes)),
@@ -216,10 +224,11 @@ class DataResetService
      * roll back, so they run afterwards. The caller must already have taken a backup.
      * @return array{deleted:array<int,array>,rows:int,files:int}
      */
-    public function purge(bool $deleteFiles = false, ?array $doomed = null): array
+    public function purge(bool $deleteFiles = false, ?array $doomed = null, array $skipTables = []): array
     {
         $doomed = $doomed ?? $this->doomedUsers();
-        $steps = array_values(array_filter($this->steps($doomed), fn ($s) => $this->tableExists($s['table'])));
+        $steps = array_values(array_filter($this->steps($doomed),
+            fn ($s) => $this->tableExists($s['table']) && !in_array($s['table'], $skipTables, true)));
 
         $engines = collect(DB::select('select table_name as name, engine as engine from information_schema.tables where table_schema = database()'))
             ->pluck('engine', 'name');

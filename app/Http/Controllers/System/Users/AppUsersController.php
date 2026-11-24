@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Services\DataResetService;
 use App\Services\DatabaseAdminService;
+use App\Services\UserDeletionService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -105,19 +106,19 @@ class AppUsersController extends Controller
     // ---------------------------------------------------------------- delete an account and everything it made
 
     /** GET users/{code}/delete-preview : what deleting this account would remove. Read-only. */
-    public function deletePreview(DataResetService $reset, $code)
+    public function deletePreview(UserDeletionService $deletion, $code)
     {
         $target = User::where('code', $code)->first();
         if (!$target) {
             return response()->json(['success' => false, 'message' => 'User not found.'], 404);
         }
-        $blocked = $reset->deleteBlocker($target, Auth::user());
+        $blocked = $deletion->blocker($target, Auth::user());
 
         return response()->json(['success' => true, 'data' => [
             'user' => ['code' => $target->code, 'fullname' => $target->fullname, 'email' => $target->email, 'role_code' => $target->role_code],
             'can_delete' => $blocked === null,
             'reason' => $blocked,
-        ] + ($blocked === null ? $reset->previewForUser($target) : [])]);
+        ] + ($blocked === null ? $deletion->preview($target) : [])]);
     }
 
     /**
@@ -126,24 +127,23 @@ class AppUsersController extends Controller
      * subscriptions, sign-in tokens). It cannot be undone, so: master admin only, the master admin's password, the
      * account's email typed back, and a database backup (or one made in the last 10 minutes) is in place first.
      */
-    public function destroy(Request $request, DataResetService $reset, DatabaseAdminService $db, $code)
+    public function destroy(Request $request, UserDeletionService $deletion, DatabaseAdminService $db, $code)
     {
         $me = Auth::user();
         $target = User::where('code', $code)->first();
         if (!$target) {
             return response()->json(['success' => false, 'message' => 'User not found.'], 404);
         }
-        if ($blocked = $reset->deleteBlocker($target, $me)) {
+        if ($blocked = $deletion->blocker($target, $me)) {
             return response()->json(['success' => false, 'message' => $blocked], 422);
         }
 
         $data = $request->validate([
             'password' => ['required', 'string'],
             'confirm' => ['required', 'string'],
-            'delete_files' => ['boolean'],
         ]);
-        if (strcasecmp(trim($data['confirm']), (string) $target->email) !== 0) {
-            return response()->json(['success' => false, 'message' => 'Type the account\'s email address exactly to confirm.'], 422);
+        if (trim($data['confirm']) !== 'DELETE') {
+            return response()->json(['success' => false, 'message' => 'Type DELETE exactly to confirm.'], 422);
         }
         if (!Hash::check($data['password'], (string) $me->password)) {
             return response()->json(['success' => false, 'message' => 'Your password is incorrect.'], 422);
@@ -159,21 +159,127 @@ class AppUsersController extends Controller
             return response()->json(['success' => false, 'message' => 'Nothing was deleted because the safety backup could not be created.'], 500);
         }
 
-        Log::info('users: delete started', ['by' => $me->code, 'target' => $target->code, 'role' => $target->role_code, 'backup' => $backup['name']]);
         try {
-            $result = $reset->purge((bool) ($data['delete_files'] ?? false), $reset->doomedForUser($target));
+            $result = $deletion->delete($target, $me, $backup['name']);
         } catch (\Throwable $e) {
             report($e);
-            Log::error('users: delete failed', ['by' => $me->code, 'target' => $target->code, 'backup' => $backup['name'], 'error' => $e->getMessage()]);
             return response()->json(['success' => false, 'message' => 'The delete failed part-way. Your safety backup is ' . $backup['name'] . '.'], 500);
         }
-        Log::info('users: delete finished', ['by' => $me->code, 'target' => $target->code, 'rows' => $result['rows'], 'files' => $result['files']]);
 
         return response()->json([
             'success' => true,
             'message' => "{$target->fullname} and all of their data were deleted.",
             'backup' => $backup + ['reused' => (bool) $reused],
-            'data' => ['rows' => $result['rows'], 'files' => $result['files']],
+            'data' => ['rows' => $result['rows'], 'anonymized' => $result['anonymized'], 'files' => $result['files_queued'], 'audit_id' => $result['audit_id']],
         ]);
+    }
+
+    // ---------------------------------------------------------------- edit an account's details
+
+    /**
+     * PATCH users/{code}  { fname, lname, email, contactno?, company? }   (DEF-MASTERADMIN only)
+     * Changes the contact details of an account. It can NOT change the role, status, password or code: those fields are
+     * not read at all, so a request that sends them has no effect on them.
+     */
+    public function update(Request $request, $code)
+    {
+        $me = Auth::user();
+        if (!$me || $me->role_code !== 'DEF-MASTERADMIN') {
+            return response()->json(['success' => false, 'message' => 'Only a master administrator can do this.'], 403);
+        }
+        $target = User::where('code', $code)->first();
+        if (!$target) {
+            return response()->json(['success' => false, 'message' => 'User not found.'], 404);
+        }
+
+        $data = $request->validate([
+            'fname' => ['required', 'string', 'max:255'],
+            'lname' => ['required', 'string', 'max:255'],
+            'contactno' => ['nullable', 'string', 'max:15'],
+            'email' => ['required', 'string', 'email', 'max:255', \Illuminate\Validation\Rule::unique('users', 'email')->ignore($target->id)],
+            'company' => ['nullable', 'string', 'max:255'],
+        ]);
+        $fullname = ucfirst($data['fname'] . ' ' . $data['lname']);
+
+        try {
+            DB::transaction(function () use ($target, $data, $fullname) {
+                $target->forceFill([
+                    'fname' => $data['fname'], 'lname' => $data['lname'], 'fullname' => $fullname,
+                    'contactno' => $data['contactno'] ?? null, 'email' => $data['email'], 'company' => $data['company'] ?? null,
+                ])->save();
+                // the profile row mirrors these fields (see sign-up)
+                DB::table('resources')->where('code', $target->code)->update([
+                    'fname' => $data['fname'], 'lname' => $data['lname'], 'fullname' => $fullname,
+                    'contact_no' => $data['contactno'] ?? null, 'email' => $data['email'], 'company' => $data['company'] ?? null,
+                ]);
+            });
+        } catch (\Throwable $e) {
+            report($e);
+            return response()->json(['success' => false, 'message' => 'The account could not be updated.'], 500);
+        }
+        Log::info('users: details edited', ['by' => $me->code, 'code' => $target->code]);
+
+        return response()->json(['success' => true, 'message' => "{$fullname} was updated.", 'data' => [
+            'code' => $target->code, 'fullname' => $fullname, 'email' => $data['email'], 'role_code' => $target->role_code, 'status' => $target->status,
+        ]]);
+    }
+
+    // ---------------------------------------------------------------- add a DEF-ADMIN account
+
+    /**
+     * POST users/admin  { fname, lname, email, password, password_confirmation, contactno?, company? }
+     * Creates a DEF-ADMIN account. DEF-MASTERADMIN only (route middleware + the check below). The role is always
+     * DEF-ADMIN: a role in the request is ignored unless it is DEF-ADMIN, and anything else (DEF-MASTERADMIN included)
+     * is rejected, so this endpoint can never create another master admin or a job seeker / recruiter.
+     */
+    public function storeAdmin(Request $request)
+    {
+        $me = Auth::user();
+        if (!$me || $me->role_code !== 'DEF-MASTERADMIN') {
+            return response()->json(['success' => false, 'message' => 'Only a master administrator can do this.'], 403);
+        }
+
+        $data = $request->validate([
+            'fname' => ['required', 'string', 'max:255'],
+            'lname' => ['required', 'string', 'max:255'],
+            'contactno' => ['nullable', 'string', 'max:15'],
+            'email' => ['required', 'string', 'email', 'max:255', 'unique:users,email'],
+            'password' => ['required', 'string', 'confirmed', 'min:8'],
+            'company' => ['nullable', 'string', 'max:255'],
+            'role_code' => ['nullable', \Illuminate\Validation\Rule::in(['DEF-ADMIN'])],
+        ], ['role_code.in' => 'Only the DEF-ADMIN role can be assigned here.']);
+
+        try {
+            $user = DB::transaction(function () use ($data) {
+                // same code scheme as sign-up; lock the last row so two creations cannot take the same code
+                $last = DB::table('users')->orderByDesc('code')->lockForUpdate()->value('code');
+                $code = empty($last) ? 701 : $last + 1;
+                $fullname = ucfirst($data['fname'] . ' ' . $data['lname']);
+
+                $user = User::create([
+                    'fname' => $data['fname'], 'lname' => $data['lname'], 'mname' => '', 'fullname' => $fullname,
+                    'contactno' => $data['contactno'] ?? null, 'email' => $data['email'], 'password' => Hash::make($data['password']),
+                    'company' => $data['company'] ?? null, 'code' => $code,
+                    'role_code' => 'DEF-ADMIN',            // fixed here, never taken from the request
+                    'status' => 'A',                       // created by a master admin: no email activation step
+                ]);
+                \App\Models\Resource::create([
+                    'code' => $code, 'fname' => $data['fname'], 'lname' => $data['lname'], 'mname' => '', 'fullname' => $fullname,
+                    'contact_no' => $data['contactno'] ?? null, 'email' => $data['email'], 'company' => $data['company'] ?? null,
+                    'role_code' => 'DEF-ADMIN', 'coverphoto' => 'default.jpg',
+                ]);
+                return $user;
+            });
+        } catch (\Throwable $e) {
+            report($e);
+            return response()->json(['success' => false, 'message' => 'The admin account could not be created.'], 500);
+        }
+        Log::info('users: admin created', ['by' => $me->code, 'code' => $user->code]);
+
+        return response()->json([
+            'success' => true,
+            'message' => "{$user->fullname} was added as DEF-ADMIN.",
+            'data' => ['code' => $user->code, 'fullname' => $user->fullname, 'email' => $user->email, 'role_code' => 'DEF-ADMIN'],
+        ], 201);
     }
 }

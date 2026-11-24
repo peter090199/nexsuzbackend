@@ -11,8 +11,10 @@ use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
 /**
- * Apply Job + Settings > Resume / CV: with no file uploaded, the applicant's default resume is used.
- * The application gets its own COPY (deleting the account resume later never changes what the recruiter received).
+ * Apply Job + Settings > Resume / CV: with no file uploaded, the applicant's default resume is used (the older "use my default" call;
+ * the Apply page now sends resume_id, see ApplyWithChosenResumeTest). The application points at the saved CV's own file: nothing is
+ * copied or uploaded again, and deleting the account resume later never changes what the recruiter received (the file stays while
+ * an application uses it).
  * Fake private disk, rolled-back transactions.
  */
 class ApplyWithDefaultResumeTest extends TestCase
@@ -63,15 +65,15 @@ class ApplyWithDefaultResumeTest extends TestCase
     public function test_the_default_resume_is_used_when_no_file_is_sent(): void
     {
         $this->saveResume();
-        $defaultPath = DB::table('user_resumes')->where('code', $this->seeker->code)->value('path');
+        $saved = DB::table('user_resumes')->where('code', $this->seeker->code)->first();
 
         $this->apply(['use_default_resume' => 1])->assertStatus(201)->assertJsonPath('success', true);
 
         $row = DB::table('applied_resumes')->where('transNo', $this->transNo)->where('code', $this->seeker->code)->first();
         $this->assertNotNull($row, 'the application has a resume');
-        $this->assertNotSame($defaultPath, $row->resume_pdf, 'a copy, not the account file itself');
-        Storage::disk('local')->assertExists($row->resume_pdf);
-        Storage::disk('local')->assertExists($defaultPath);
+        $this->assertSame($saved->path, $row->resume_pdf, 'the saved CV\'s own file, not a copy');
+        $this->assertSame((int) $saved->id, (int) $row->user_resume_id, 'the reference to the saved CV');
+        $this->assertCount(1, Storage::disk('local')->allFiles("uploads/{$this->seeker->code}"), 'no duplicate file was written');
     }
 
     public function test_deleting_the_account_resume_later_keeps_what_the_recruiter_received(): void
@@ -86,14 +88,16 @@ class ApplyWithDefaultResumeTest extends TestCase
         Storage::disk('local')->assertExists($sent);
     }
 
-    public function test_an_uploaded_file_wins_over_the_default(): void
+    public function test_a_new_upload_and_the_saved_default_cannot_be_combined(): void
     {
         $this->saveResume();
 
+        // exactly ONE CV goes with an application
         $this->apply(['use_default_resume' => 1, 'resume_pdf' => UploadedFile::fake()->create('other.pdf', 50, 'application/pdf')])
-            ->assertStatus(201);
+            ->assertStatus(422)->assertJsonValidationErrors('resume_id');
 
-        $this->assertSame(1, DB::table('applied_resumes')->where('transNo', $this->transNo)->count());
+        $this->assertSame(0, DB::table('applied_jobs')->where('transNo', $this->transNo)->count());
+        $this->assertSame(0, DB::table('applied_resumes')->where('transNo', $this->transNo)->count());
     }
 
     public function test_without_a_default_or_a_file_the_cv_is_still_required(): void

@@ -8,6 +8,7 @@ namespace App\Helpers;
  * Everything lives on the "public" disk and is served through the public/storage symlink:
  *
  *   uploads/posts/{userCode}/{postUuid}/{file}        post images / videos
+ *   uploads/announcements/{userCode}/{uuid}/{file}    announcement images / attachments
  *   uploads/comments/{userCode}/{file}                comment images
  *   uploads/{userCode}/cvphoto/{uuid}/{file}          profile photo
  *   uploads/{userCode}/coverphoto/{uuid}/{file}       cover photo
@@ -21,6 +22,7 @@ class MediaUrl
 {
     private const PATTERNS = [
         '#uploads/posts/.+$#',
+        '#uploads/announcements/.+$#',
         '#uploads/comments/.+$#',
         '#uploads/\d+/(?:cvphoto|coverphoto)/.+$#',
         '#uploads/DEFAULTPROFILE/.+$#',
