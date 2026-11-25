@@ -29,7 +29,7 @@ use Illuminate\Validation\Rule;
  */
 class CommentController extends Controller
 {
-    private const DEFAULT_PIC = 'https://exploredition.com/storage/app/public/uploads/DEFAULTPROFILE/DEFAULTPROFILE.png';
+    private static function defaultPic(): string { return Storage::disk('public')->url('uploads/DEFAULTPROFILE/DEFAULTPROFILE.png'); }
     private const DUPLICATE_WINDOW_SECONDS = 5;
 
     // ------------------------------------------------------------------ helpers
@@ -82,7 +82,7 @@ class CommentController extends Controller
             $u = $users->get($c);
             $out[$c] = [
                 'name' => $u ? trim($u->fname . ' ' . $u->lname) : 'Unknown user',
-                'pic'  => $pics->get($c) ?: self::DEFAULT_PIC,
+                'pic'  => $pics->get($c) ?: self::defaultPic(),
             ];
         }
 
@@ -110,7 +110,7 @@ class CommentController extends Controller
 
     private function shapeReply($r, array $people, array $reactions, $me, ?string $postOwner): array
     {
-        $p = $people[$r->code] ?? ['name' => 'Unknown user', 'pic' => self::DEFAULT_PIC];
+        $p = $people[$r->code] ?? ['name' => 'Unknown user', 'pic' => self::defaultPic()];
         $isOwner = (string) $r->code === (string) $me;
 
         return [
@@ -137,7 +137,7 @@ class CommentController extends Controller
 
     private function shapeComment($c, array $replies, array $people, array $reactions, array $replyReactions, $me, ?string $postOwner): array
     {
-        $p = $people[$c->code] ?? ['name' => 'Unknown user', 'pic' => self::DEFAULT_PIC];
+        $p = $people[$c->code] ?? ['name' => 'Unknown user', 'pic' => self::defaultPic()];
         $isOwner = (string) $c->code === (string) $me;
 
         return [
@@ -696,7 +696,7 @@ class CommentController extends Controller
             $grouped[$row->reaction]['person'][] = [
                 'code'      => $row->code,
                 'fullname'  => trim($row->fname . ' ' . $row->lname) ?: 'Unknown user',
-                'photo_pic' => $row->photo_pic ?: self::DEFAULT_PIC,
+                'photo_pic' => $row->photo_pic ?: self::defaultPic(),
             ];
         }
 

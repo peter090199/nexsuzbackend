@@ -38,6 +38,19 @@ class AppServiceProvider extends ServiceProvider
             }
         });
 
+        // Every view under resources/views/email gets the saved email theme (name, logo, colors) as $brand, unless the caller
+        // passed its own (the live preview does). A problem reading it falls back to the default navy theme: mail still goes out.
+        \Illuminate\Support\Facades\View::composer('email.*', function ($view) {
+            if (array_key_exists('brand', $view->getData())) { return; }
+            $svc = app(\App\Services\EmailBrandingService::class);
+            try {
+                $view->with('brand', $svc->data());
+            } catch (\Throwable $e) {
+                report($e);
+                $view->with('brand', $svc->build(app(\App\Services\BusinessProfileService::class)->defaults()));
+            }
+        });
+
         // "Last successful email": any message the app really sends through the saved SMTP settings
         \Illuminate\Support\Facades\Event::listen(\Illuminate\Mail\Events\MessageSent::class, function () {
             try {

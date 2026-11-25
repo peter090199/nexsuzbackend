@@ -45,6 +45,24 @@ return [
             'local_domain' => env('MAIL_EHLO_DOMAIN'),
         ],
 
+        /*
+         * Website "Contact us" inbox. SMTP sign-in lives ONLY in .env (CONTACT_MAIL_*, each falling back to MAIL_*),
+         * never in the database or Angular. Works with Gmail, Google Workspace, Hostinger or any SMTP host.
+         * The RECIPIENT is not here: it comes from Nexsuz Information.
+         */
+        'contact' => [
+            'transport' => 'smtp',
+            'host' => env('CONTACT_MAIL_HOST', env('MAIL_HOST')),
+            'port' => (int) env('CONTACT_MAIL_PORT', env('MAIL_PORT', 587)),
+            'encryption' => env('CONTACT_MAIL_ENCRYPTION', env('MAIL_ENCRYPTION', 'tls')),
+            'username' => env('CONTACT_MAIL_USERNAME', env('MAIL_USERNAME')),
+            'password' => env('CONTACT_MAIL_PASSWORD', env('MAIL_PASSWORD')),
+            // implicit TLS (smtps) for ssl, otherwise plain SMTP that upgrades with STARTTLS
+            'scheme' => in_array(strtolower((string) env('CONTACT_MAIL_ENCRYPTION', env('MAIL_ENCRYPTION', 'tls'))), ['ssl', 'smtps'], true) ? 'smtps' : 'smtp',
+            'timeout' => 15,
+            'local_domain' => env('MAIL_EHLO_DOMAIN'),
+        ],
+
         'ses' => [
             'transport' => 'ses',
         ],
@@ -100,6 +118,12 @@ return [
     'from' => [
         'address' => env('MAIL_FROM_ADDRESS', 'hello@example.com'),
         'name' => env('MAIL_FROM_NAME', 'Example'),
+    ],
+
+    /* Sender of website inquiries: the authenticated mailbox (Gmail requires it to match the sign-in or an alias). */
+    'contact_from' => [
+        'address' => env('CONTACT_MAIL_FROM_ADDRESS', env('MAIL_FROM_ADDRESS')),
+        'name' => env('CONTACT_MAIL_FROM_NAME', env('MAIL_FROM_NAME', 'Nexsuz Website')),
     ],
 
     /*

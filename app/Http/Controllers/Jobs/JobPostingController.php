@@ -62,7 +62,7 @@ class JobPostingController extends Controller
     //             $folderPath = "uploads/{$user->code}/JobPosting/{$uuid}";
     //             $fileName = time() . '.' . $file->getClientOriginalExtension();
     //             $filePath = $file->storeAs($folderPath, $fileName, 'public');
-    //             $validated['job_image'] = "/storage/app/public/" . $filePath;
+    //             $validated['job_image'] = "/storage/" . $filePath;
     //         }
 
     //         // ---------- CREATE NEW JOB ----------
@@ -200,7 +200,7 @@ class JobPostingController extends Controller
     //             $folderPath = "uploads/{$user->code}/JobPosting/{$uuid}";
     //             $fileName = time() . '.' . $file->getClientOriginalExtension();
     //             $filePath = $file->storeAs($folderPath, $fileName, 'public');
-    //             $validated['job_image'] = "/storage/app/public/" . $filePath;
+    //             $validated['job_image'] = "/storage/" . $filePath;
     //         }
 
     //         // ---------- CREATE NEW JOB ----------
@@ -703,7 +703,7 @@ class JobPostingController extends Controller
                     'public'
                 );
 
-                $validated['job_image'] = "/storage/app/public/" . $filePath;
+                $validated['job_image'] = "/storage/" . $filePath;
             }
 
             // =========================================================
@@ -992,7 +992,7 @@ class JobPostingController extends Controller
                 $folderPath = "uploads/{$user->code}/JobPosting/{$uuid}";
                 $fileName = time() . '.' . $file->getClientOriginalExtension();
                 $filePath = $file->storeAs($folderPath, $fileName, 'public');
-                $validated['job_image'] = "/storage/app/public/" . $filePath;
+                $validated['job_image'] = "/storage/" . $filePath;
             }
 
             DB::beginTransaction();
@@ -1109,7 +1109,7 @@ class JobPostingController extends Controller
                 $folderPath = "uploads/{$currentUserCode}/JobPosting/{$uuid}";
                 $fileName = time() . '.' . $file->getClientOriginalExtension();
                 $filePath = $file->storeAs($folderPath, $fileName, 'public');
-                $job->job_image = "/storage/app/public/" . $filePath;
+                $job->job_image = "/storage/" . $filePath;
             }
 
             // ✅ Update fields

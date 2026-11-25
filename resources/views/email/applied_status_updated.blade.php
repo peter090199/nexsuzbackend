@@ -1,110 +1,33 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Application Status Update</title>
-    <style>
-        /* General styles */
-        body {
-            margin: 0;
-            padding: 0;
-            font-family: Verdana, sans-serif;
-            background-color: #f5f7fa;
-        }
+@extends('email.layouts.branded')
 
-        .email-container {
-            max-width: 600px;
-            margin: 20px auto;
-            background-color: #ffffff;
-            padding: 25px;
-            border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        }
+@section('title', 'Application Status Update')
 
-        h3 {
-            color: #2a3f54;
-            margin-bottom: 10px;
-        }
+@section('content')
+    <h3 style="margin:0 0 10px;font-size:18px;color:{{ $brand['theme']['colors']['text'] }};">Dear {{ $fullname }},</h3>
 
-        p {
-            font-size: 15px;
-            color: #333;
-            line-height: 1.6;
-            margin-bottom: 12px;
-        }
+    <p style="margin:0 0 12px;">Your application for the position <strong>{{ $jobName }}</strong> has been updated.</p>
 
-        .status-badge {
-            display: inline-block;
-            padding: 8px 15px;
-            border-radius: 4px;
-            font-weight: bold;
-            color: #fff;
-            font-size: 14px;
-            text-align: center;
-        }
+    @php
+        $s = strtolower($status);
+        // status colors stay semantic (amber / green / red) in every theme
+        $badge = $s == 'review' ? '#f0ad4e' : ($s == 'approved' ? '#28a745' : ($s == 'reject' ? '#dc3545' : $brand['theme']['colors']['primary']));
+    @endphp
+    <p style="margin:0 0 12px;">
+        Current Status:
+        <span style="display:inline-block;padding:8px 15px;border-radius:4px;font-weight:bold;color:#ffffff;font-size:14px;text-align:center;background-color:{{ $badge }};">
+            {{ ucfirst($status) }}
+        </span>
+    </p>
 
-        .status-review { background-color: #f0ad4e; }   /* Orange */
-        .status-approved { background-color: #28a745; } /* Green */
-        .status-rejected { background-color: #dc3545; } /* Red */
-
-        .footer {
-            margin-top: 25px;
-            font-size: 13px;
-            color: #777;
-            text-align: center;
-        }
-
-        /* Responsive styles */
-        @media screen and (max-width: 480px) {
-            .email-container {
-                padding: 15px;
-            }
-            h3 {
-                font-size: 18px;
-            }
-            p {
-                font-size: 14px;
-            }
-            .status-badge {
-                padding: 6px 12px;
-                font-size: 13px;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="email-container">
-        <h3>Dear {{ $fullname }},</h3>
-
-        <p>Your application for the position <strong>{{ $jobName }}</strong> has been updated.</p>
-
-        <p>
-            Current Status:
-            <span class="status-badge
-                @if(strtolower($status) == 'review') status-review
-                @elseif(strtolower($status) == 'approved') status-approved
-                @elseif(strtolower($status) == 'reject') status-rejected
-                @endif
-            ">
-                {{ ucfirst($status) }}
-            </span>
-        </p>
-
-        <p>
-            @if(strtolower($status) == 'review')
-                Your application is currently under review. We will notify you once the evaluation is complete.
-            @elseif(strtolower($status) == 'approved')
-                Congratulations! Your application has been approved. Our team will contact you with the next steps.
-            @elseif(strtolower($status) == 'reject')
-                We regret to inform you that your application has not been successful. We encourage you to apply for future opportunities.
-            @else
-                Your application status has been updated to <strong>{{ $status }}</strong>.
-            @endif
-        </p>
-
-        <div class="footer">
-            &copy; {{ date('Y') }} {{ config('app.name') }} – All rights reserved.
-        </div>
-    </div>
-</body>
-</html>
+    <p style="margin:0 0 12px;">
+        @if($s == 'review')
+            Your application is currently under review. We will notify you once the evaluation is complete.
+        @elseif($s == 'approved')
+            Congratulations! Your application has been approved. Our team will contact you with the next steps.
+        @elseif($s == 'reject')
+            We regret to inform you that your application has not been successful. We encourage you to apply for future opportunities.
+        @else
+            Your application status has been updated to <strong>{{ $status }}</strong>.
+        @endif
+    </p>
+@endsection

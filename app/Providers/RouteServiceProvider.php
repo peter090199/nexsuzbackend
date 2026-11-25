@@ -69,6 +69,16 @@ class RouteServiceProvider extends ServiceProvider
         $perAdmin('email-config', 30, 1);
         $perAdmin('email-test-connection', 8, 1);
         $perAdmin('email-test-email', 5, 1);
+        // Nexsuz Information: own counters, so the 3-per-minute test email is not eaten by ordinary page requests
+        $perAdmin('business-info', 60, 1);
+        $perAdmin('contact-mail-check', 6, 1);
+        $perAdmin('contact-mail-test', 3, 1);
+        $perAdmin('email-theme-preview', 60, 1);
+        // Contact Inquiries: page requests are generous; sending email is tight (an admin cannot be used to flood someone)
+        $perAdmin('inquiries', 120, 1);
+        $perAdmin('inquiry-reply', 15, 10);
+        // public contact form: 5 messages per minute for each visitor address
+        RateLimiter::for('contact-message', fn (Request $r) => Limit::perMinute(5)->by('contact-message|' . $r->ip()));
     }
     
 }

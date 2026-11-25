@@ -582,7 +582,7 @@ class ProfileController extends Controller
                         "email" =>  $userprofile ? ($userprofile->code != Auth::user()->code && $userprofile->email_visibility === 0  ? ' '  : $contactEmail ) : '',
                         "fname" => $resource[$r]->fname,
                         "lname" => $resource[$r]->lname,
-                        "photo_pic" => $userprofile->photo_pic ?? 'https://exploredition.com/storage/app/public/uploads/DEFAULTPROFILE/DEFAULTPROFILE.png',
+                        "photo_pic" => $userprofile->photo_pic ?? Storage::disk('public')->url('uploads/DEFAULTPROFILE/DEFAULTPROFILE.png'),
                         "contact_no" => $userprofile ? ($userprofile->code != Auth::user()->code && $userprofile->contact_visibility == 0  ? ' '  : $contactNo ) : '',
                         "contact_visibility" => $userprofile->contact_visibility ??  null,
                         "email_visibility" => $userprofile->email_visibility ??  null,

@@ -62,7 +62,7 @@ class User extends Authenticatable
 
         // Delete old cover photo if exists
         if ($this->coverphoto) {
-            $oldPath = str_replace(Storage::url(''), '', $this->coverphoto);
+            $oldPath = str_replace(Storage::disk('public')->url(''), '', $this->coverphoto);
             if (Storage::exists($oldPath)) {
                 Storage::delete($oldPath);
             }
@@ -74,7 +74,7 @@ class User extends Authenticatable
         $filePath = $file->storeAs($folderPath, $fileName, 'public');
 
         // Use Storage::url() to get proper public URL
-        $this->coverphoto = Storage::url($filePath);
+        $this->coverphoto = Storage::disk('public')->url($filePath);
         $this->save();
 
         return $this->coverphoto;

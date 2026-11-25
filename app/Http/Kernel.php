@@ -66,6 +66,8 @@ class Kernel extends HttpKernel
         'verified' => \Illuminate\Auth\Middleware\EnsureEmailIsVerified::class,
         'checkstatus' => \App\Http\Middleware\CheckStatus::class,
         'masteradmin' => \App\Http\Middleware\EnsureMasterAdmin::class,
+        'menuaccess' => \App\Http\Middleware\EnsureMenuAccess::class,
+        'businessinfo' => \App\Http\Middleware\EnsureBusinessInfoAccess::class,
         'subscriptionadmin' => \App\Http\Middleware\EnsureSubscriptionAdmin::class,
         'cvwriter' => \App\Http\Middleware\EnsureCanCreateCv::class
     ];

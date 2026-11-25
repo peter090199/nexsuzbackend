@@ -78,7 +78,7 @@ class ProfilepictureController extends Controller
 
                    if ($exists) {
                 UserProfile::where('code', $userCode)->update([
-                     'photo_pic' => "https://exploredition.com/storage/app/public/".$folderPath."/".$fileName,
+                     'photo_pic' => Storage::disk('public')->url($folderPath.'/'.$fileName),
                 ]);
             } else {
                 $transNo = UserProfile::max('transNo');
@@ -87,7 +87,7 @@ class ProfilepictureController extends Controller
                 UserProfile::insert([
                     'code' => $folderPath,
                     'transNo' => $newTrans,
-                     'photo_pic' => "https://exploredition.com/storage/app/public/".$folderPath."/".$fileName,
+                     'photo_pic' => Storage::disk('public')->url($folderPath.'/'.$fileName),
                 ]);
             }
             DB::commit(); // Commit the transaction

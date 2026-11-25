@@ -97,6 +97,10 @@
         return Broadcast::auth(request());
     });
 
+    // PUBLIC website: Contact section data (only what the display switches allow) and the contact form
+    Route::get('business-info/public', [\App\Http\Controllers\System\BusinessInfoController::class, 'publicShow']);
+    Route::post('contact-message', [\App\Http\Controllers\System\BusinessInfoController::class, 'contact'])->middleware('throttle:contact-message');
+
     Route::middleware(['auth:sanctum', 'checkstatus'])->group(function () {
         Route::get('user', function (Request $request) {
             return $request->user();
@@ -478,6 +482,35 @@
             Route::post('/toggle', [EmailConfigController::class, 'toggle']);
             Route::post('/test-connection', [EmailConfigController::class, 'testConnection'])->middleware('throttle:email-test-connection');
             Route::post('/test-email', [EmailConfigController::class, 'testEmail'])->middleware('throttle:email-test-email');
+        });
+
+        // NEXSUZ INFORMATION (DEF-MASTERADMIN, or DEF-ADMIN when the "nexsuzinfo" submenu is assigned): one shared business record
+        Route::prefix('business-info')->middleware(['businessinfo', 'throttle:business-info'])->group(function () {
+            Route::get('/', [\App\Http\Controllers\System\BusinessInfoController::class, 'show']);
+            Route::put('/', [\App\Http\Controllers\System\BusinessInfoController::class, 'update']);
+            Route::post('/reset', [\App\Http\Controllers\System\BusinessInfoController::class, 'reset']);
+            Route::post('/logo', [\App\Http\Controllers\System\BusinessInfoController::class, 'uploadLogo']);
+            Route::delete('/logo', [\App\Http\Controllers\System\BusinessInfoController::class, 'removeLogo']);
+            Route::post('/email-theme/preview', [\App\Http\Controllers\System\BusinessInfoController::class, 'previewEmailTheme'])->middleware('throttle:email-theme-preview');
+            Route::post('/email-theme/test', [\App\Http\Controllers\System\BusinessInfoController::class, 'testEmailTheme'])->middleware('throttle:contact-mail-test');
+            Route::get('/contact-mail', [\App\Http\Controllers\System\BusinessInfoController::class, 'contactMailStatus']);
+            Route::post('/contact-mail/check', [\App\Http\Controllers\System\BusinessInfoController::class, 'contactMailCheck'])->middleware('throttle:contact-mail-check');
+            Route::post('/contact-mail/test', [\App\Http\Controllers\System\BusinessInfoController::class, 'contactMailTest'])->middleware('throttle:contact-mail-test');
+        });
+
+        // CONTACT INQUIRIES (DEF-MASTERADMIN, or DEF-ADMIN when the menu is assigned): visitor messages, replies and history
+        Route::prefix('contact-inquiries')->middleware(['menuaccess:contactinquiries', 'throttle:inquiries'])->group(function () {
+            $c = \App\Http\Controllers\System\ContactInquiryController::class;
+            Route::get('/', [$c, 'index']);
+            Route::get('/unread-count', [$c, 'unreadCount']);
+            Route::get('/{id}', [$c, 'show'])->whereNumber('id');
+            Route::post('/{id}/read', [$c, 'setRead'])->whereNumber('id');
+            Route::post('/{id}/status', [$c, 'setStatus'])->whereNumber('id');
+            Route::post('/{id}/assign', [$c, 'assign'])->whereNumber('id');
+            Route::post('/{id}/reply', [$c, 'reply'])->whereNumber('id')->middleware('throttle:inquiry-reply');
+            Route::get('/{id}/messages/{messageId}/attachments/{index}', [$c, 'attachment'])->whereNumber(['id', 'messageId', 'index']);
+            Route::post('/{id}/restore', [$c, 'restore'])->whereNumber('id');
+            Route::delete('/{id}', [$c, 'destroy'])->whereNumber('id');
         });
 
         //ACCOUNT PLAN  FEATURES

@@ -648,7 +648,7 @@ class PostController extends Controller
                             $profilePic = Userprofile::select('photo_pic')->where('code', $requestedCode)->first();
                             $result[] = [
                                 "Fullname" => $post->created_by,
-                                "photo_pic" => $profilePic->photo_pic ?? 'https://exploredition.com/storage/app/public/uploads/DEFAULTPROFILE/DEFAULTPROFILE.png',
+                                "photo_pic" => $profilePic->photo_pic ?? Storage::disk('public')->url('uploads/DEFAULTPROFILE/DEFAULTPROFILE.png'),
                                 "status" => $post->status,
                                 "caption" => $post->caption,
                                 "posts_uuid" => $post->posts_uuid,

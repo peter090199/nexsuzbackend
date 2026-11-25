@@ -169,7 +169,8 @@ class RecruitmentPipeline
 
         try {
             if (!empty($app->email) && \App\Helpers\NotificationPrefs::allowsEmailForCode($app->code ?? null, 'email_application_updates')) {
-                Mail::raw($text['body'], function ($m) use ($app, $text) {
+                // same recipient, subject and wording as before; now inside the branded layout (with the plain-text part kept)
+                Mail::send(['html' => 'email.notice', 'text' => 'email.notice-text'], ['subject' => $text['subject'], 'body' => $text['body']], function ($m) use ($app, $text) {
                     $m->to($app->email)->subject($text['subject']);
                 });
                 $sent = true;
