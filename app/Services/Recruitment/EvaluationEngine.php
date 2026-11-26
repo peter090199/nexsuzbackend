@@ -3,9 +3,12 @@
 namespace App\Services\Recruitment;
 
 use App\Models\Jobs\JobPosting;
+use App\Services\CvImport\CvParser;
+use App\Services\CvImport\CvTextExtractor;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 
 /**
  * AI-assisted candidate evaluation.
@@ -20,8 +23,8 @@ use Illuminate\Support\Facades\Log;
  */
 class EvaluationEngine
 {
-    public const CATEGORIES = ['education', 'experience', 'skills', 'answers', 'competencies'];
-    public const ENGINE_VERSION = '1';
+    public const CATEGORIES = ['skills', 'experience', 'education', 'requirements', 'certifications'];
+    public const ENGINE_VERSION = '2';
 
     // ===================================================================== settings (weights, thresholds, criteria)
 
@@ -32,12 +35,13 @@ class EvaluationEngine
         $row = $job ?: $global;
 
         $weights = $row ? (json_decode($row->weights, true) ?: []) : [];
-        $thresholds = $row ? (json_decode($row->thresholds, true) ?: []) : [];
+        // weights saved for the earlier category set can't be mapped onto these five: use the defaults
+        if (!isset($weights['requirements'])) { $weights = []; }
 
         return [
             'scope'         => $job ? 'job' : 'global',
             'weights'       => array_merge(config('recruitment.default_weights'), array_intersect_key($weights, array_flip(self::CATEGORIES))),
-            'thresholds'    => array_merge(config('recruitment.default_thresholds'), $thresholds),
+            'thresholds'    => config('recruitment.levels'),
             'passing_score' => (int) ($row->passing_score ?? 70),
             'competencies'  => self::lines($row->competencies ?? ''),
         ];
@@ -66,7 +70,7 @@ class EvaluationEngine
 
         $required = $job->required_skills ? (json_decode($job->required_skills, true) ?: []) : [];
 
-        return [
+        $input = [
             'job' => [
                 'title' => $job->job_name, 'department' => $job->job_position, 'employment_type' => $job->employment_type,
                 'experience_level' => $job->experience_level, 'education_requirement' => $job->education,
@@ -93,6 +97,59 @@ class EvaluationEngine
                 ];
             })->all(),
         ];
+
+        return self::fillFromResume($app, $input);
+    }
+
+    /**
+     * Sections the profile leaves empty are read from the PDF sent with this application. Only work-related sections are
+     * taken from it (never the name, address, birth date or photo). An unreadable file is simply not used.
+     */
+    private static function fillFromResume(object $app, array $input): array
+    {
+        $input['from_resume'] = [];
+        $c = $input['candidate'];
+        if ($c['education'] && $c['experience'] && $c['skills'] && $c['certifications']) { return $input; }
+
+        $stored = DB::table('applied_resumes')->where('transNo', $app->transNo)->where('code', $app->code)->orderByDesc('resume_id')->value('resume_pdf');
+        if (!$stored || str_contains($stored, '..') || !preg_match('#uploads/.+\.pdf$#i', $stored, $m)) { return $input; }
+
+        try {
+            $disk = collect(['local', 'public'])->first(fn ($d) => Storage::disk($d)->exists($m[0]));
+            if (!$disk) { return $input; }
+            $cv = (new CvParser())->parse((new CvTextExtractor())->extract(Storage::disk($disk)->path($m[0]), 'pdf'));
+        } catch (\Throwable $e) {
+            Log::info('Evaluation: the applicant\'s CV file could not be read: ' . $e->getMessage());
+            return $input;
+        }
+
+        $found = [
+            'education' => array_map(fn ($x) => ['level' => $x['highest_education'] ?? '', 'school' => $x['school_name'] ?? '', 'from' => $x['start_year'] ?? null, 'to' => $x['end_year'] ?? null], $cv['education']),
+            'experience' => array_map(fn ($x) => ['company' => $x['company_name'] ?? '', 'position' => $x['position'] ?? '', 'description' => $x['job_description'] ?? '', 'until' => $x['date_completed'] ?? null], $cv['employment']),
+            'skills' => array_column($cv['skills'], 'skills'),
+            'certifications' => array_column($cv['certificate'], 'certificate_title'),
+        ];
+        foreach ($found as $section => $rows) {
+            if (!$input['candidate'][$section] && $rows) {
+                $input['candidate'][$section] = $rows;
+                $input['from_resume'][] = $section;
+            }
+        }
+
+        return $input;
+    }
+
+    /** the automatic run when someone applies: once per application, and never allowed to break anything */
+    public static function evaluateNew(int $appliedId): void
+    {
+        try {
+            $app = RecruitmentPipeline::load($appliedId);
+            if ($app && $app->job && !DB::table('candidate_evaluations')->where('applied_id', $appliedId)->exists()) {
+                self::evaluate($app, null);
+            }
+        } catch (\Throwable $e) {
+            Log::error('Automatic candidate evaluation failed for application ' . $appliedId . ': ' . $e->getMessage());
+        }
     }
 
     // ===================================================================== run an evaluation
@@ -122,6 +179,7 @@ class EvaluationEngine
         }
 
         $result = self::finalize($raw, $input, $settings);
+        if ($input['from_resume']) { $note = trim($note . ' Taken from the uploaded CV because the profile has none: ' . implode(', ', $input['from_resume']) . '.'); }
         if ($note) { $result['explanation'] = $note . ' ' . $result['explanation']; }
 
         $id = DB::table('candidate_evaluations')->insertGetId([
@@ -160,19 +218,20 @@ RULES
 - Use only the job requirements, the candidate's education, work history, skills, certifications, trainings and screening answers that you are given.
 - NEVER consider or infer age, gender, race, ethnicity, nationality, religion, disability, health, marital or family status, sexual orientation, appearance, name, location of origin, or personality. If something in the data hints at one of these, ignore it completely.
 - Judge the MEANING and relevance of answers and experience, not exact keywords. A different wording of the same skill counts as a match.
-- Be honest about uncertainty. If information is missing, say so and score it low rather than guessing.
+- Missing information is not evidence that the candidate lacks something. Say it is missing; do not score it as a failure.
 - You only advise. You never decide to accept or reject anyone.
 - Scores are integers 0-100. Evidence must quote or point to facts in the data you were given.
 
 Reply with ONE JSON object and nothing else, with exactly these keys:
 {
- "categories": { "education": {"score":0,"evidence":""}, "experience": {...}, "skills": {...}, "answers": {...}, "competencies": {...} },
+ "categories": { "skills": {"score":0,"evidence":""}, "experience": {...}, "education": {...}, "requirements": {...}, "certifications": {...} },
  "strengths": [""], "weaknesses": [""], "matched": [""], "missing": [""],
  "answers": [ {"question_id":0,"score":0,"status":"complete|incomplete|unclear|not_answered","explanation":"","follow_up":""} ],
  "interview_questions": [""],
  "explanation": ""
 }
-Use null for a category's score when it does not apply (for example "answers" when there are no questions, "competencies" when none are listed).
+"requirements" covers the stated qualifications, competencies and screening answers.
+Use null for a category's score when the job asks nothing of that kind.
 TXT;
 
     private static function callAnthropic(array $input, array $settings): array
@@ -209,10 +268,25 @@ TXT;
     /** never trust a provider's JSON: clamp scores, drop unknown questions, compute the weighted total ourselves */
     public static function finalize(array $raw, array $input, array $settings): array
     {
+        $cand = $input['candidate'];
+        $work = $cand['skills'] || $cand['experience'] || $cand['certifications'] || $cand['trainings'];
+        $has = [
+            'skills' => $work, 'experience' => (bool) $cand['experience'], 'education' => (bool) $cand['education'],
+            'certifications' => (bool) $cand['certifications'],
+            'requirements' => $work || $cand['education'] || collect($input['questions'])->contains(fn ($q) => trim($q['answer']) !== ''),
+        ];
+
         $cats = [];
         foreach (self::CATEGORIES as $c) {
             $score = self::clamp($raw['categories'][$c]['score'] ?? null);
             $cats[$c] = ['score' => $score, 'evidence' => mb_substr(trim((string) ($raw['categories'][$c]['evidence'] ?? '')), 0, 600)];
+            if (isset($raw['categories'][$c]['other'])) { $cats[$c]['other'] = self::clamp($raw['categories'][$c]['other']); }
+            // missing information never counts as "unqualified": at least a neutral score, and the recruiter is told
+            if ($score !== null && !$has[$c]) {
+                $cats[$c]['score'] = max($score, 50);
+                $cats[$c]['no_info'] = true;
+                $cats[$c]['evidence'] = trim($cats[$c]['evidence'] . ' Not enough information: this is a neutral score to verify, not a finding that the candidate is unqualified.');
+            }
         }
 
         $ids = collect($input['questions'])->pluck('id')->all();
@@ -233,7 +307,7 @@ TXT;
         $overall = self::weighted($cats, $settings['weights']);
 
         return [
-            'categories' => $cats, 'overall_score' => $overall, 'recommendation' => self::recommend($overall, $settings['thresholds']),
+            'categories' => $cats, 'overall_score' => $overall, 'recommendation' => self::recommend($overall),
             'strengths' => self::strings($raw['strengths'] ?? []), 'weaknesses' => self::strings($raw['weaknesses'] ?? []),
             'matched' => self::strings($raw['matched'] ?? [], 30), 'missing' => self::strings($raw['missing'] ?? [], 30),
             'answers' => $answers, 'interview_questions' => self::strings($raw['interview_questions'] ?? [], 8),
@@ -241,23 +315,26 @@ TXT;
         ];
     }
 
-    /** weights of the categories that apply (score not null), re-balanced to 100 */
+    /** weights of the categories that apply (score not null), re-balanced to 100. Older stored runs have other categories. */
     public static function weighted(array $cats, array $weights): int
     {
         $sum = 0; $total = 0;
-        foreach (self::CATEGORIES as $c) {
+        foreach ($weights as $c => $w) {
             $s = $cats[$c]['score'] ?? null;
-            $w = (float) ($weights[$c] ?? 0);
-            if ($s === null || $w <= 0) { continue; }
-            $sum += $s * $w; $total += $w;
+            if ($s === null || (float) $w <= 0) { continue; }
+            $sum += $s * (float) $w; $total += (float) $w;
         }
 
         return $total > 0 ? (int) round($sum / $total) : 0;
     }
 
-    public static function recommend(int $score, array $t): string
+    public static function recommend(int $score): string
     {
-        return $score >= (int) $t['strong'] ? 'strong' : ($score >= (int) $t['qualified'] ? 'qualified' : ($score >= (int) $t['review'] ? 'review' : 'low'));
+        foreach (config('recruitment.levels') as $level => $from) {
+            if ($score >= $from) { return $level; }
+        }
+
+        return 'low';
     }
 
     // ===================================================================== reading a stored evaluation
@@ -265,18 +342,19 @@ TXT;
     public static function format(object $row): array
     {
         $j = fn ($v) => $v ? (json_decode($v, true) ?: []) : [];
-        $thresholds = $j($row->thresholds);
+        $level = self::recommend((int) ($row->final_score ?? $row->overall_score));      // older runs get today's levels too
 
         return [
             'id' => (int) $row->id, 'applied_id' => (int) $row->applied_id,
             'overall_score' => (int) $row->overall_score, 'final_score' => $row->final_score !== null ? (int) $row->final_score : null,
             'score' => (int) ($row->final_score ?? $row->overall_score),
-            'recommendation' => $row->recommendation, 'recommendation_label' => config('recruitment.recommendations')[$row->recommendation] ?? $row->recommendation,
+            'recommendation' => $level, 'recommendation_label' => config('recruitment.recommendations')[$level],
+            'incomplete' => array_keys(array_filter($j($row->category_scores), fn ($c) => !empty($c['no_info']))),
             'categories' => $j($row->category_scores), 'strengths' => $j($row->strengths), 'weaknesses' => $j($row->weaknesses),
             'matched' => $j($row->matched), 'missing' => $j($row->missing), 'answers' => $j($row->answer_evals),
             'explanation' => $row->explanation, 'interview_questions' => $j($row->interview_questions),
             'provider' => $row->provider, 'model' => $row->model, 'version' => $row->version,
-            'weights' => $j($row->weights), 'criteria' => $j($row->criteria), 'thresholds' => $thresholds,
+            'weights' => $j($row->weights), 'criteria' => $j($row->criteria), 'thresholds' => $j($row->thresholds),
             'status' => $row->status, 'created_at' => $row->created_at, 'reviewed_at' => $row->reviewed_at,
             'human_review_required' => true,
         ];
@@ -291,7 +369,6 @@ TXT;
         $answers = json_decode($row->answer_evals, true) ?: [];
         $cats = json_decode($row->category_scores, true) ?: [];
         $weights = json_decode($row->weights, true) ?: config('recruitment.default_weights');
-        $thresholds = json_decode($row->thresholds, true) ?: config('recruitment.default_thresholds');
         $finalOverall = $row->final_score !== null ? (int) $row->final_score : null;
         $overallOverride = null;
 
@@ -319,11 +396,17 @@ TXT;
             }
         });
 
-        // the answers category follows the recruiter's scores; the total is recomputed from it
-        if ($answers) {
+        // the category holding the answers follows the recruiter's scores; the total is recomputed from it
+        if ($answers && collect($changes)->contains(fn ($c) => $c['question_id'] !== null)) {
             $applicable = array_filter($answers, fn ($a) => ($a['status'] ?? '') !== 'not_answered' || ($a['final_score'] ?? null) !== null);
             if ($applicable) {
-                $cats['answers']['score'] = (int) round(array_sum(array_map(fn ($a) => $a['final_score'] ?? $a['score'], $applicable)) / count($applicable));
+                $avg = array_sum(array_map(fn ($a) => $a['final_score'] ?? $a['score'], $applicable)) / count($applicable);
+                if (isset($cats['requirements'])) {
+                    $other = $cats['requirements']['other'] ?? null;
+                    $cats['requirements']['score'] = (int) round($other === null ? $avg : ($avg + $other) / 2);
+                } else {
+                    $cats['answers']['score'] = (int) round($avg);      // a run from before the five criteria
+                }
             }
         }
         $recomputed = self::weighted($cats, $weights);
@@ -331,7 +414,7 @@ TXT;
 
         DB::table('candidate_evaluations')->where('id', $row->id)->update([
             'answer_evals' => json_encode($answers), 'category_scores' => json_encode($cats),
-            'final_score' => $finalOverall, 'recommendation' => self::recommend($finalOverall, $thresholds),
+            'final_score' => $finalOverall, 'recommendation' => self::recommend($finalOverall),
             'status' => 'reviewed', 'reviewed_by' => $user->code, 'reviewed_at' => now(), 'updated_at' => now(),
         ]);
 
@@ -429,10 +512,10 @@ TXT;
         $have = 0; $haveText = '';
         foreach ($cand['education'] as $e) { $l = self::eduLevel($e['level'] ?? ''); if ($l >= $have) { $have = $l; $haveText = trim(($e['level'] ?? '') . ($e['school'] ? ' – ' . $e['school'] : '')); } }
         if (!$cand['education']) {
-            $cats['education'] = ['score' => $req ? 25 : 50, 'evidence' => 'No education was listed on the candidate\'s CV.'];
-            $weaknesses[] = 'No education listed on the CV.';
+            $cats['education'] = ['score' => $req ? 50 : null, 'evidence' => 'No education was listed on the candidate\'s CV.'];
+            if ($req) { $missing[] = 'Not provided: education'; }
         } elseif ($req === 0) {
-            $cats['education'] = ['score' => 85, 'evidence' => 'The job states no specific education requirement. Candidate lists: ' . $haveText . '.'];
+            $cats['education'] = ['score' => null, 'evidence' => 'The job states no specific education requirement. Candidate lists: ' . $haveText . '.'];
         } elseif ($have >= $req) {
             $cats['education'] = ['score' => 100, 'evidence' => 'Requirement: ' . self::eduName($req) . '. Candidate lists ' . $haveText . '.'];
             $matched[] = 'Education: meets ' . self::eduName($req) . ' requirement';
@@ -458,7 +541,7 @@ TXT;
             if ($pct >= 75) { $strengths[] = 'Covers most of the required skills.'; }
             if ($pct < 50) { $weaknesses[] = 'Many required skills are not evident on the CV.'; }
         } else {
-            $cats['skills'] = ['score' => $cand['skills'] ? 70 : 50, 'evidence' => 'The job lists no required skills, so only the presence of skills on the CV was considered.'];
+            $cats['skills'] = ['score' => null, 'evidence' => 'The job lists no required skills.'];
         }
 
         // --- experience (the CV has no start dates, so relevance and number of roles are used, not years)
@@ -470,8 +553,8 @@ TXT;
         }
         $needed = match (mb_strtolower((string) ($job['experience_level'] ?? ''))) { 'entry', 'entry level', 'junior' => 0, 'mid', 'mid level', 'intermediate' => 1, 'senior', 'lead', 'manager', 'executive' => 2, default => 1 };
         if (!$roles) {
-            $cats['experience'] = ['score' => $needed === 0 ? 45 : 15, 'evidence' => 'No work history was listed on the CV.'];
-            $weaknesses[] = 'No work history listed.';
+            $cats['experience'] = ['score' => 50, 'evidence' => 'No work history was listed on the CV.'];
+            $missing[] = 'Not provided: work history';
         } else {
             $score = 25 + 30 * min($relevant, 2) + 10 * min(count($roles) - $relevant, 1) + ($relevant >= $needed ? 15 : 0);
             $cats['experience'] = ['score' => min(100, $score), 'evidence' => "{$relevant} of " . count($roles) . ' listed roles relate to this job' . ($best ? ' (e.g. ' . ($best['position'] ?? 'a related role') . ')' : '') . '. Years of experience cannot be measured because the CV stores no start dates.'];
@@ -481,6 +564,7 @@ TXT;
 
         // --- screening answers
         $answers = [];
+        $answerScore = null;
         foreach ($in['questions'] as $q) {
             $a = trim($q['answer']);
             $row = ['question_id' => $q['id'], 'score' => 0, 'status' => 'complete', 'explanation' => '', 'follow_up' => ''];
@@ -513,35 +597,57 @@ TXT;
         $applicable = array_filter($answers, fn ($r) => !($r['status'] === 'not_answered' && !collect($in['questions'])->firstWhere('id', $r['question_id'])['required']));
         if ($answers && $applicable) {
             $avg = (int) round(array_sum(array_column($applicable, 'score')) / count($applicable));
-            $cats['answers'] = ['score' => $avg, 'evidence' => count($applicable) . ' screening answer(s) were evaluated.'];
+            $answerScore = $avg;
             foreach ($answers as $r) {
                 if ($r['score'] >= 80) { $strengths[] = 'Strong answer: ' . mb_substr($in['questions'][array_search($r['question_id'], array_column($in['questions'], 'id'))]['text'], 0, 80); }
                 if ($r['follow_up'] !== '') { $iq[] = $r['follow_up']; }
             }
             if ($avg < 50) { $weaknesses[] = 'Screening answers are weak, incomplete or unclear.'; }
-        } else {
-            $cats['answers'] = ['score' => null, 'evidence' => 'This job has no screening questions.'];
         }
 
-        // --- job-specific competencies
-        $comps = $job['competencies'] ?? [];
-        if ($comps) {
+        // --- job requirements: stated qualifications and competencies, together with the screening answers
+        $certWords = self::tokens('certification certificate certified license licensed licensure required preferred must have valid');
+        $lines = array_values(array_filter(array_map(fn ($l) => trim($l, " \t-*•."),
+            preg_split('/[\r\n;•]+|(?<=\.)\s+/u', strip_tags((string) ($job['qualifications'] ?? '')))), fn ($l) => mb_strlen($l) > 2));
+        $certLines = array_values(array_filter($lines, fn ($l) => preg_match('/certifi|licen[sc]/i', $l)));
+        $wanted = array_merge(array_values(array_diff($lines, $certLines)), $job['competencies'] ?? []);
+        $pool = array_merge($everything, self::tokens(implode(' ', array_column($cand['education'], 'level'))));
+        $hit = 0;
+        foreach ($wanted as $w) {
+            if (self::overlap(self::tokens($w), $pool) >= 0.5) { $hit++; $matched[] = 'Requirement: ' . mb_substr($w, 0, 120); }
+            else { $missing[] = 'Requirement (verify): ' . mb_substr($w, 0, 120); $iq[] = 'Give an example that shows: ' . mb_substr($w, 0, 160); }
+        }
+        $other = $wanted ? (int) round($hit / count($wanted) * 100) : null;
+        $parts = array_values(array_filter([$other, $answerScore], fn ($v) => $v !== null));
+        $cats['requirements'] = [
+            'score' => $parts ? (int) round(array_sum($parts) / count($parts)) : null, 'other' => $other,
+            'evidence' => $parts
+                ? trim(($wanted ? "{$hit} of " . count($wanted) . ' stated requirements are evident. ' : '') . ($answerScore !== null ? "Screening answers scored {$answerScore}." : ''))
+                : 'The job states no further requirements or screening questions.',
+        ];
+
+        // --- certifications and licenses
+        $held = array_values(array_filter(array_map('trim', array_map('strval', $cand['certifications']))));
+        $heldPool = self::tokens(implode(' ', array_merge($held, $cand['trainings'])));
+        if ($certLines) {
             $hit = 0;
-            foreach ($comps as $c) {
-                $ov = self::overlap(self::tokens($c), $everything);
-                if ($ov >= 0.6) { $hit++; $matched[] = "Competency: {$c}"; } else { $missing[] = "Competency: {$c}"; $iq[] = "Give an example that shows: {$c}"; }
+            foreach ($certLines as $w) {
+                if (self::overlap(array_values(array_diff(self::tokens($w), $certWords)), $heldPool) >= 0.5) { $hit++; $matched[] = 'Certification: ' . mb_substr($w, 0, 120); }
+                else { $missing[] = ($held ? 'Certification: ' : 'Not provided: ') . mb_substr($w, 0, 120); }
             }
-            $cats['competencies'] = ['score' => (int) round($hit / count($comps) * 100), 'evidence' => "{$hit} of " . count($comps) . ' job-specific competencies are evident from the CV and answers.'];
+            $cats['certifications'] = ['score' => (int) round($hit / count($certLines) * 100), 'evidence' => "{$hit} of " . count($certLines) . ' required certifications or licenses are listed.'];
         } else {
-            $cats['competencies'] = ['score' => null, 'evidence' => 'No job-specific competencies were configured for this job.'];
+            $relevantCerts = array_values(array_filter($held, fn ($c) => array_intersect(array_diff(self::tokens($c), $certWords), $jobPool)));
+            $cats['certifications'] = $relevantCerts
+                ? ['score' => 100, 'evidence' => 'The job requires none; related certification listed: ' . implode(', ', array_slice($relevantCerts, 0, 3)) . '.']
+                : ['score' => null, 'evidence' => 'The job requires no certification, so this is not counted.'];
         }
 
         if ($best) { $iq[] = 'Walk us through your role as ' . ($best['position'] ?? 'your most relevant position') . ' and what you achieved.'; }
         $iq[] = 'What interests you about this role, and what would you want to learn in the first 90 days?';
 
         $explanation = 'Rules-based review of the candidate\'s education, work history, skills and answers against this job. '
-            . 'Skills ' . ($cats['skills']['score'] ?? '–') . ', education ' . ($cats['education']['score'] ?? '–') . ', experience ' . ($cats['experience']['score'] ?? '–')
-            . ($cats['answers']['score'] !== null ? ', answers ' . $cats['answers']['score'] : '') . '. '
+            . implode(', ', array_map(fn ($c) => $c . ' ' . ($cats[$c]['score'] ?? 'n/a'), self::CATEGORIES)) . '. '
             . 'Matching uses meaning-aware word groups (synonyms and word forms) rather than exact keywords, but it cannot read between the lines like a person: please review the evidence below.';
 
         return [

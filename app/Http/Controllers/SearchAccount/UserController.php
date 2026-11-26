@@ -155,6 +155,7 @@ class UserController extends Controller
             ->leftJoin('userprofiles', 'userprofiles.code', '=', 'users.code')
             ->leftJoin('userskills', 'userskills.code', '=', 'users.code')
             ->leftJoin('resources', 'resources.code', '=', 'users.code')
+            ->whereNotIn('users.code', \App\Helpers\ProfilePrivacy::limitedCodes())
             ->select(
                 'users.code',
                 'users.role_code',
@@ -248,18 +249,16 @@ class UserController extends Controller
         $page    = max((int) $request->input('page', 1), 1);
         $perPage = min(max((int) $request->input('per_page', 10), 1), 50);
 
-        $connected = DB::table('follows')->where('follow_status', 'accepted')
-            ->where(fn ($q) => $q->where('follower_code', $code)->orWhere('following_code', $code))
-            ->get(['follower_code', 'following_code'])
-            ->flatMap(fn ($f) => [(string) $f->follower_code, (string) $f->following_code])
-            ->unique()->reject(fn ($c) => $c === (string) $code)->values()->all();
+        $connected = \App\Helpers\ProfilePrivacy::can($code, $viewer) ? \App\Helpers\ProfilePrivacy::connectionCodes($code) : [];
+        $mine = \App\Helpers\ProfilePrivacy::connectionCodes($viewer);
 
         $users = DB::table('users')
             ->leftJoin('userprofiles', 'userprofiles.code', '=', 'users.code')
             ->leftJoin('userskills', 'userskills.code', '=', 'users.code')
             ->leftJoin('resources', 'resources.code', '=', 'users.code')
             ->select(
-                'users.code', 'users.role_code', 'users.status', 'users.fullname', 'users.is_online',
+                'users.code', 'users.role_code', 'users.status', 'users.fullname', 'users.is_online', 'users.id as user_id',
+                DB::raw('COALESCE(MIN(userprofiles.current_location), MIN(resources.current_location)) as location'),
                 DB::raw('MIN(resources.profession) as profession'),
                 DB::raw('GROUP_CONCAT(DISTINCT userskills.skills ORDER BY userskills.skills SEPARATOR ", ") as skills'),
                 DB::raw('MIN(userprofiles.photo_pic) as photo_pic'),
@@ -274,9 +273,16 @@ class UserController extends Controller
                     ->orWhere('userskills.skills', 'LIKE', "%$search%")
                     ->orWhere('resources.profession', 'LIKE', "%$search%");
             }))
-            ->groupBy('users.code', 'users.role_code', 'users.status', 'users.fullname', 'users.is_online')
+            ->groupBy('users.code', 'users.role_code', 'users.status', 'users.fullname', 'users.is_online', 'users.id')
             ->orderByRaw('LOWER(users.fullname) ASC')
-            ->get();
+            ->get()
+            // a member who limited their profile does not have their location listed
+            ->each(function ($u) {
+                static $limited = null;
+                $limited ??= \App\Helpers\ProfilePrivacy::limitedCodes();
+                if (in_array($u->code, $limited)) { $u->location = null; }
+            })
+            ->each(fn ($u) => $u->is_mutual = (string) $code !== (string) $viewer && in_array((string) $u->code, $mine, true));
 
         return $this->paginateOnlineOffline($users, $page, $perPage, true);
     }

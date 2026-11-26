@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Auth;
 
 use App\Helpers\MediaUrl;
+use App\Helpers\ProfilePrivacy;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth; 
@@ -579,11 +580,11 @@ class ProfileController extends Controller
                         // the "New Curriculum Vitae" button: own profile AND an account type that may create a CV
                         "btnCurriculum" => ($resource[$r]->code == Auth::user()->code
                             && \App\Http\Middleware\EnsureCanCreateCv::allows(Auth::user())) ? 1  : '',
-                        "email" =>  $userprofile ? ($userprofile->code != Auth::user()->code && $userprofile->email_visibility === 0  ? ' '  : $contactEmail ) : '',
+                        "email" => $userprofile ? $contactEmail : null,
                         "fname" => $resource[$r]->fname,
                         "lname" => $resource[$r]->lname,
                         "photo_pic" => $userprofile->photo_pic ?? Storage::disk('public')->url('uploads/DEFAULTPROFILE/DEFAULTPROFILE.png'),
-                        "contact_no" => $userprofile ? ($userprofile->code != Auth::user()->code && $userprofile->contact_visibility == 0  ? ' '  : $contactNo ) : '',
+                        "contact_no" => $userprofile ? $contactNo : null,
                         "contact_visibility" => $userprofile->contact_visibility ??  null,
                         "email_visibility" => $userprofile->email_visibility ??  null,
                         "summary" => $userprofile->summary ?? null,
@@ -635,6 +636,17 @@ class ProfileController extends Controller
                 $result['resume'] = ($isOwn && ($result['role_code'] ?? null) === 'DEF-USERS')
                     ? $this->resumeSummary((int) $id)
                     : null;
+
+                $viewer = Auth::user()->code;
+                $result = ProfilePrivacy::apply($result, $id, $viewer);
+                $connections = ProfilePrivacy::connectionCodes($id);
+                $result['connections_count'] = count($connections);
+                $result['mutual_count'] = $isOwn ? 0 : count(array_intersect($connections, ProfilePrivacy::connectionCodes($viewer)));
+                $result['user_id'] = (int) DB::table('users')->where('code', $id)->value('id');
+                $result['company'] = $resource[0]->company ?? null;
+                $result['industry'] = $resource[0]->industry ?? null;
+                $result['companywebsite'] = $resource[0]->companywebsite ?? null;
+                $result['share_url'] = rtrim((string) config('app.frontend_url'), '/') . '/p/' . (int) $id;
 
                 return response()->json([
                     'success' => true,
@@ -758,13 +770,29 @@ class ProfileController extends Controller
                 return response()->json(['success' => false, 'blocked' => true, 'message' => 'This profile is not available.'], 404);
             }
 
+            $viewer = Auth::user()->code;
             $user = DB::table('resources')
                 ->leftJoin('userprofiles', 'resources.code', '=', 'userprofiles.code')
-                ->select('resources.*', 'userprofiles.photo_pic')
+                ->select('resources.code', 'resources.fname', 'resources.lname', 'resources.fullname', 'resources.profession',
+                    'resources.company', 'resources.industry', 'resources.companywebsite', 'resources.designation', 'resources.role_code',
+                    'resources.current_location', 'resources.coverphoto', 'resources.email', 'resources.contact_no',
+                    'userprofiles.photo_pic', 'userprofiles.summary as about', 'userprofiles.contact_visibility', 'userprofiles.email_visibility')
                 ->where('resources.code', $code)
                 ->first();
 
             if ($user) {
+                $own = (string) $code === (string) $viewer;
+                if (!$own) {
+                    $contactOk = ProfilePrivacy::can($code, $viewer, 'contact');
+                    if (!$contactOk || $user->email_visibility == 1) { $user->email = null; }
+                    if (!$contactOk || $user->contact_visibility == 1) { $user->contact_no = null; }
+                    if (!ProfilePrivacy::can($code, $viewer)) {
+                        $user->about = $user->current_location = $user->companywebsite = null;
+                    }
+                }
+                unset($user->contact_visibility, $user->email_visibility);
+                $user->followers = $user->following = count(ProfilePrivacy::connectionCodes($code));
+
                 return response()->json([
                     'success' => true,
                     'message' => $user
@@ -1042,9 +1070,203 @@ class ProfileController extends Controller
             return response()->json(['success' => false, 'message' => 'User is not authenticated']);
         }
 
-         $currentUserCode = Auth::user()->code;
+        return response()->json([
+            'success' => true,
+            'message' => $this->cvRows(Auth::user()->code)
+        ]);
+    }
 
-        // ✅ Get all user profiles for the logged-in user
+    // ------------------------------------------------------------------
+    //  Shared CV link (no sign in needed)
+    //
+    //  The link is {frontend}/cv/{code}/{signature}. The signature is an HMAC of the code with the app key, so only
+    //  links handed out by shareCvLink() work: changing the code in the address does not open somebody else's CV.
+    //  Nothing is stored, so one link cannot be revoked on its own; deactivating the account switches it off.
+    // ------------------------------------------------------------------
+
+    /** GET cv/share-link — the signed-in job seeker's own link (the route is behind 'cvwriter'). */
+    public function shareCvLink()
+    {
+        $code = Auth::user()->code;
+        $privacy = ProfilePrivacy::get($code);
+        if (!$privacy['cv_link'] || $privacy['profile'] !== 'public') {
+            return response()->json(['success' => false, 'message' => 'Your CV link is switched off in Settings > Profile & Privacy.'], 409);
+        }
+        $path = 'cv/' . $code . '/' . $this->cvSignature($code);
+
+        return response()->json([
+            'success' => true,
+            'url' => rtrim((string) config('app.frontend_url'), '/') . '/' . $path,
+        ]);
+    }
+
+    /** GET cv/shared/{code}/{signature} — public. */
+    public function sharedCv(string $code, string $signature)
+    {
+        $cv = $this->sharedCvRow($code, $signature);
+        if (!$cv) {
+            return $this->sharedCvNotFound();
+        }
+
+        // the owner's "Hide on my CV" switches (1 = hidden) are applied here, so hidden values never leave the server
+        if ($cv['email_visibility']) {
+            $cv['email'] = null;
+        }
+        if ($cv['contact_visibility']) {
+            $cv['contact_no'] = null;
+        }
+        // an anonymous visitor gets only what is public
+        $privacy = ProfilePrivacy::get($code);
+        if ($privacy['contact'] !== 'public') {
+            $cv['email'] = $cv['contact_no'] = null;
+        }
+        if ($privacy['personal'] !== 'public') {
+            $cv['date_birth'] = $cv['home_country'] = $cv['home_state'] = $cv['current_location'] = $cv['current_state'] = null;
+        }
+        if ($privacy['experience'] !== 'public') {
+            $cv['lines'] = array_map(fn () => collect(), $cv['lines']);
+        }
+        $cv['lines']['certificate'] = $cv['lines']['certificate']->map(fn ($c) => [
+            'certificate_title' => $c->certificate_title,
+            'certificate_provider' => $c->certificate_provider,
+            'date_completed' => $c->date_completed,
+        ]);
+
+        return response()->json(['success' => true, 'message' => [$cv]])
+            ->header('Cache-Control', 'no-store, private');
+    }
+
+    /** GET cv/shared/{code}/{signature}/photo — the same picture with CORS headers, for the PDF export. */
+    public function sharedCvPhoto(string $code, string $signature)
+    {
+        $cv = $this->sharedCvRow($code, $signature);
+        $relative = $cv ? MediaUrl::relativePath($cv['photo_pic']) : null;
+
+        // only this owner's own profile photo: nothing else on the disk is reachable through a share link
+        if (!$relative
+            || !preg_match('#^uploads/' . (int) $code . '/cvphoto/[^.][^?]*\.(jpe?g|png|gif|webp|jfif)$#i', $relative)
+            || str_contains($relative, '..')
+            || !Storage::disk('public')->exists($relative)) {
+            return response()->json(['success' => false, 'message' => 'Image not found.'], 404);
+        }
+
+        return response()->file(Storage::disk('public')->path($relative), [
+            'Cache-Control' => 'max-age=300',
+        ])->setPrivate();
+    }
+
+    private function cvSignature($code): string
+    {
+        return rtrim(strtr(base64_encode(hash_hmac('sha256', 'cv-share|' . (int) $code, (string) config('app.key'), true)), '+/', '-_'), '=');
+    }
+
+    /** The CV behind a share link, or null: wrong signature, or not (or no longer) an active job seeker. */
+    private function sharedCvRow(string $code, string $signature): ?array
+    {
+        if (!hash_equals($this->cvSignature($code), $signature)) {
+            return null;
+        }
+        $owner = User::where('code', $code)->first();
+        if (!$owner || $owner->status !== 'A' || !\App\Http\Middleware\EnsureCanCreateCv::allows($owner)) {
+            return null;
+        }
+
+        $privacy = ProfilePrivacy::get($owner->code);
+        if (!$privacy['cv_link'] || $privacy['profile'] !== 'public') {
+            return null;
+        }
+
+        return $this->cvRows($owner->code)[0] ?? null;
+    }
+
+    private function sharedCvNotFound()
+    {
+        return response()->json(['success' => false, 'message' => 'This CV link is not valid or the CV is no longer available.'], 404);
+    }
+
+    // ------------------------------------------------------------------
+    //  Profile privacy and the logged-out profile
+    // ------------------------------------------------------------------
+
+    /** PUT company-details : a recruiter edits the company shown on their own profile */
+    public function updateCompany(Request $request)
+    {
+        $user = Auth::user();
+        if ($user->role_code !== 'DEF-CLIENT') {
+            return response()->json(['success' => false, 'message' => 'Only recruiter accounts have a company profile.'], 403);
+        }
+        $v = $request->validate([
+            'company' => 'required|string|max:255', 'industry' => 'nullable|string|max:255', 'companywebsite' => 'nullable|string|max:255',
+            'location' => 'nullable|string|max:255', 'about' => 'nullable|string|max:255',
+        ]);
+
+        DB::transaction(function () use ($user, $v) {
+            DB::table('users')->where('code', $user->code)->update(['company' => $v['company'], 'updated_at' => now()]);
+            DB::table('resources')->where('code', $user->code)->update(['company' => $v['company'], 'industry' => $v['industry'] ?? null,
+                'companywebsite' => $v['companywebsite'] ?? null, 'current_location' => $v['location'] ?? null, 'updated_at' => now()]);
+            $profile = ['summary' => $v['about'] ?? null, 'current_location' => $v['location'] ?? null, 'updated_at' => now()];
+            if (!DB::table('userprofiles')->where('code', $user->code)->update($profile)) {
+                DB::table('userprofiles')->insert($profile + ['code' => $user->code, 'transNo' => 1, 'created_at' => now()]);
+            }
+        });
+
+        return response()->json(['success' => true, 'message' => 'Company information saved.']);
+    }
+
+    /** GET privacy-settings (own) */
+    public function privacySettings()
+    {
+        return response()->json(['success' => true, 'data' => ProfilePrivacy::get(Auth::user()->code)]);
+    }
+
+    /** PUT privacy-settings (own) */
+    public function savePrivacySettings(Request $request)
+    {
+        $level = 'required|in:' . implode(',', ProfilePrivacy::LEVELS);
+        $v = $request->validate(['profile' => $level, 'contact' => $level, 'experience' => $level, 'personal' => $level,
+            'visitors' => 'required|boolean', 'cv_link' => 'required|boolean']);
+        $v['visitors'] = (bool) $v['visitors'] && $v['profile'] === 'public';
+        $v['cv_link'] = (bool) $v['cv_link'];
+        DB::table('users')->where('code', Auth::user()->code)->update(['privacy_settings' => json_encode($v), 'updated_at' => now()]);
+
+        return response()->json(['success' => true, 'message' => 'Privacy settings saved.', 'data' => $v]);
+    }
+
+    /** GET public/profile/{code} : no sign in. Only for owners who opted in; never contact details or CV. */
+    public function publicProfile(string $code)
+    {
+        $owner = User::where('code', $code)->first();
+        if (!$owner || $owner->status !== 'A' || in_array($owner->role_code, \App\Helpers\PostVisibility::ADMIN_ROLES, true)
+            || !ProfilePrivacy::openToVisitors($code)) {
+            return response()->json(['success' => false, 'message' => 'This profile is not public.'], 404);
+        }
+
+        $r = DB::table('resources')->where('code', $code)->first(['fname', 'lname', 'profession', 'company', 'industry', 'companywebsite', 'current_location', 'coverphoto']);
+        $p = DB::table('userprofiles')->where('code', $code)->first(['photo_pic', 'summary', 'current_location']);
+
+        $posts = DB::table('posts')->where('code', $code)->where('status', \App\Helpers\PostVisibility::PUBLIC)
+            ->orderByDesc('created_at')->limit(20)->get(['posts_uuid', 'caption', 'created_at']);
+        $images = DB::table('attachmentposts')->whereIn('posts_uuid', $posts->pluck('posts_uuid'))->where('posts_type', 'image')
+            ->get(['posts_uuid', 'path_url'])->groupBy('posts_uuid');
+
+        return response()->json(['success' => true, 'data' => [
+            'name' => $owner->fullname, 'role_code' => $owner->role_code,
+            'photo_pic' => $p->photo_pic ?? null, 'coverphoto' => ($r->coverphoto ?? null) ?: ($owner->coverphoto ?: null),
+            'profession' => $r->profession ?? null, 'company' => $r->company ?? null, 'industry' => $r->industry ?? null,
+            'companywebsite' => $r->companywebsite ?? null, 'location' => ($p->current_location ?? null) ?: ($r->current_location ?? null),
+            'about' => $p->summary ?? null,
+            'connections_count' => count(ProfilePrivacy::connectionCodes($code)),
+            'jobs' => DB::table('jobposting')->where('code', $code)->where('recordstatus', 'active')->orderByDesc('created_at')->limit(20)
+                ->get(['transNo', 'job_name', 'company', 'location', 'work_type', 'created_at']),
+            'posts' => $posts->map(fn ($x) => ['caption' => $x->caption, 'created_at' => $x->created_at,
+                'images' => ($images[$x->posts_uuid] ?? collect())->map(fn ($i) => ['path_url' => $i->path_url])->values()])->values(),
+        ]])->header('Cache-Control', 'no-store');
+    }
+
+    /** One account's CV, one entry per userprofiles row. */
+    private function cvRows($currentUserCode): array
+    {
+        // ✅ Get all user profiles for this user
         $userProfiles = DB::table('userprofiles')->where('code', $currentUserCode)->get();
 
         // ✅ Get common resource info once
@@ -1111,10 +1333,7 @@ class ProfileController extends Controller
             ];
         }
 
-        return response()->json([
-            'success' => true,
-            'message' => $result
-        ]);
+        return $result;
     }
 
 

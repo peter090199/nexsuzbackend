@@ -90,7 +90,7 @@ class CandidateReviewController extends Controller
                 'job_name' => $r->job_name, 'applied_status' => $r->applied_status ?: 'applied_active',
                 'applied_at' => $r->created_at, 'updated_at' => $r->updated_at,
                 'ai_score' => $e ? (int) ($e->final_score ?? $e->overall_score) : null,
-                'ai_recommendation' => $e->recommendation ?? null,
+                'ai_recommendation' => $e ? EvaluationEngine::recommend((int) ($e->final_score ?? $e->overall_score)) : null,
                 'ai_reviewed' => $e ? $e->status === 'reviewed' : false,
                 'next_interview' => isset($next[$r->applied_id]) ? $next[$r->applied_id]->first()->scheduled_at : null,
                 'notes_count' => (int) ($notes[$r->applied_id] ?? 0),
@@ -458,20 +458,14 @@ class CandidateReviewController extends Controller
     {
         $v = $request->validate([
             'transNo' => 'nullable|string|max:50',
-            'weights' => 'required|array', 'weights.education' => 'required|integer|between:0,100', 'weights.experience' => 'required|integer|between:0,100',
-            'weights.skills' => 'required|integer|between:0,100', 'weights.answers' => 'required|integer|between:0,100', 'weights.competencies' => 'required|integer|between:0,100',
-            'thresholds' => 'required|array', 'thresholds.strong' => 'required|integer|between:1,100',
-            'thresholds.qualified' => 'required|integer|between:1,100', 'thresholds.review' => 'required|integer|between:1,100',
+            'weights' => 'required|array', 'weights.skills' => 'required|integer|between:0,100', 'weights.experience' => 'required|integer|between:0,100',
+            'weights.education' => 'required|integer|between:0,100', 'weights.requirements' => 'required|integer|between:0,100',
+            'weights.certifications' => 'required|integer|between:0,100',
             'passing_score' => 'required|integer|between:0,100',
             'competencies' => 'nullable|string|max:3000',
         ]);
 
         if (array_sum($v['weights']) <= 0) { return $this->fail('At least one weight must be above 0.'); }
-        $t = $v['thresholds'];
-        if (!($t['strong'] > $t['qualified'] && $t['qualified'] > $t['review'])) {
-            return $this->fail('Thresholds must go down: strong match above qualified above needs-review.');
-        }
-
         $transNo = $v['transNo'] ?? null;
         if ($transNo) {
             [, $err] = $this->job($transNo);
@@ -480,7 +474,7 @@ class CandidateReviewController extends Controller
             return $this->fail('Only a master administrator can change the global defaults.', 403);
         }
 
-        $data = ['weights' => json_encode($v['weights']), 'thresholds' => json_encode($t), 'passing_score' => $v['passing_score'],
+        $data = ['weights' => json_encode($v['weights']), 'thresholds' => json_encode(config('recruitment.levels')), 'passing_score' => $v['passing_score'],
             'competencies' => $v['competencies'] ?? null, 'updated_by' => Auth::user()->code, 'updated_at' => now()];
         $exists = DB::table('evaluation_settings')->when($transNo, fn ($q) => $q->where('transNo', $transNo), fn ($q) => $q->whereNull('transNo'))->exists();
         if ($exists) {

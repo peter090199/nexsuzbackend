@@ -1,4 +1,4 @@
-    <?php
+<?php
 
     use Illuminate\Http\Request;
     use Illuminate\Support\Facades\Route;
@@ -101,6 +101,17 @@
     Route::get('business-info/public', [\App\Http\Controllers\System\BusinessInfoController::class, 'publicShow']);
     Route::post('contact-message', [\App\Http\Controllers\System\BusinessInfoController::class, 'contact'])->middleware('throttle:contact-message');
 
+    // PUBLIC language data: the picker and the texts are needed before anyone signs in
+    Route::get('i18n/config', [\App\Http\Controllers\System\LocalizationController::class, 'config']);
+    Route::get('i18n/countries', [\App\Http\Controllers\System\LocalizationController::class, 'countries']);
+    Route::get('i18n/translations/{locale}', [\App\Http\Controllers\System\LocalizationController::class, 'translations']);
+
+    // PUBLIC shared CV: read only, and only with the signature from the link the owner shared (see ProfileController)
+    Route::get('cv/shared/{code}/{signature}', [ProfileController::class, 'sharedCv'])->whereNumber('code');
+    // PUBLIC profile: only for owners who opted in to logged-out visitors
+    Route::get('public/profile/{code}', [ProfileController::class, 'publicProfile'])->whereNumber('code');
+    Route::get('cv/shared/{code}/{signature}/photo', [ProfileController::class, 'sharedCvPhoto'])->whereNumber('code');
+
     Route::middleware(['auth:sanctum', 'checkstatus'])->group(function () {
         Route::get('user', function (Request $request) {
             return $request->user();
@@ -126,6 +137,21 @@
         Route::post('uploadProfilePhoto', [ProfileController::class, 'uploadProfilePhoto']);
         Route::post('removeProfilePhoto', [ProfileController::class, 'removeProfilePhoto']);
         Route::get('media', [ProfileController::class, 'media']);
+        // own language, and (master admin only) Language Setup
+        Route::get('i18n/preference', [\App\Http\Controllers\System\LocalizationController::class, 'preference']);
+        Route::put('i18n/preference', [\App\Http\Controllers\System\LocalizationController::class, 'savePreference']);
+        Route::middleware('masteradmin')->controller(\App\Http\Controllers\System\LocalizationController::class)->prefix('i18n')->group(function () {
+            Route::get('admin', 'admin');
+            Route::get('users', 'users');
+            Route::put('users/{id}', 'setUserLanguage')->whereNumber('id');
+            Route::put('countries/{code}', 'setCountry');
+            Route::post('languages', 'saveLanguage');
+            Route::put('languages/{code}', 'setLanguage');
+            Route::put('translations/{locale}', 'saveTranslations');
+        });
+        Route::put('company-details', [ProfileController::class, 'updateCompany']);
+        Route::get('privacy-settings', [ProfileController::class, 'privacySettings']);
+        Route::put('privacy-settings', [ProfileController::class, 'savePrivacySettings']);
         //users
         Route::get('getUsers', [AppUsersController::class, 'getUsers']);
         // admin dashboards (DEF-ADMIN and DEF-MASTERADMIN; the controller scopes the data by role)
@@ -323,6 +349,8 @@
         Route::put('updateWorkExperience/{id}', [UserWorkExperiences::class, 'updateWorkExperience'])->middleware(['cvwriter', 'planfeature:CREATE_RESUME']);
         //GET CV DATA ALL
         Route::get('getProfileCV', [ProfileController::class, 'getProfileCV']);
+        // the link a job seeker shares for their own CV
+        Route::get('cv/share-link', [ProfileController::class, 'shareCvLink'])->middleware('cvwriter');
         //JobPosting
         Route::post('saveJobPosting', [JobPostingController::class, 'saveJobPosting'])->middleware('planfeature:JOB_POSTING');
 

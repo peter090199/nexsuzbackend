@@ -360,6 +360,9 @@ class AppliedJobController extends Controller
 
             DB::commit();
 
+            // score the application after the response is sent, so a slow AI provider never delays applying
+            dispatch(function () use ($appliedId) { \App\Services\Recruitment\EvaluationEngine::evaluateNew($appliedId); })->afterResponse();
+
             // "application received" (chat + email, best effort: never fails the application)
             try {
                 $fresh = \App\Services\Recruitment\RecruitmentPipeline::load($appliedId);

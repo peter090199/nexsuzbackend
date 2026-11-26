@@ -44,13 +44,20 @@ class PostController extends Controller
 
                 if ($requestedCode) {
                     // Scenario 1: Viewing a specific code profile
-                    if ($authCode == $requestedCode) {
-                        // Show all posts (including private)
-                        $posts = Post::where('code', $authCode)->get();
-                    } else {
-                        // Show only public posts
-                        $posts = PostVisibility::limit(Post::where('code', $requestedCode), $requestedCode, $authCode)->get();
+                    // statusesFor() gives the owner all of them; a profile the viewer may not open shows no posts
+                    $query = PostVisibility::limit(Post::where('code', $requestedCode), $requestedCode, $authCode)
+                        ->orderByDesc('created_at')->orderByDesc('id');
+                    if (!\App\Helpers\ProfilePrivacy::can($requestedCode, $authCode)) {
+                        $query->whereRaw('1 = 0');
                     }
+                    // ?page=2 loads more; without it everything is returned, as before
+                    $perPage = $request->filled('page') ? 5 : null;
+                    if ($perPage) {
+                        $page = max(1, (int) $request->query('page'));
+                        $hasMore = (clone $query)->count() > $page * $perPage;
+                        $query->forPage($page, $perPage);
+                    }
+                    $posts = $query->get();
 
                     $commentController = new CommentController();
 
@@ -102,7 +109,8 @@ class PostController extends Controller
 
                 return response()->json([
                     'success' => true,
-                    'data' => array_values($result)
+                    'data' => array_values($result),
+                    'has_more' => $hasMore ?? false
                 ]);
             } catch (\Throwable $th) {
                 return response()->json([

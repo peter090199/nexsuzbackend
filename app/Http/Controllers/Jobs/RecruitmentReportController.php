@@ -78,8 +78,8 @@ class RecruitmentReportController extends Controller
 
         // ---- AI evaluation
         $scoreOf = fn ($e) => (int) ($e->final_score ?? $e->overall_score);
-        $dist = ['strong' => 0, 'qualified' => 0, 'review' => 0, 'low' => 0];
-        foreach ($evals as $e) { if (isset($dist[$e->recommendation])) { $dist[$e->recommendation]++; } }
+        $dist = ['excellent' => 0, 'strong' => 0, 'good' => 0, 'moderate' => 0, 'low' => 0];
+        foreach ($evals as $e) { $dist[\App\Services\Recruitment\EvaluationEngine::recommend((int) ($e->final_score ?? $e->overall_score))]++; }
 
         // ---- interviews
         $done = $interviews->where('status', 'completed');

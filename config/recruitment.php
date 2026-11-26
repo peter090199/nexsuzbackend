@@ -43,13 +43,16 @@ return [
         'reject'         => ['applied_active', 'review'],
     ],
 
-    'default_weights' => ['education' => 15, 'experience' => 25, 'skills' => 30, 'answers' => 20, 'competencies' => 10],
-    'default_thresholds' => ['strong' => 85, 'qualified' => 70, 'review' => 50],
+    // the five scoring criteria and the share each has in the 0-100 total
+    'default_weights' => ['skills' => 35, 'experience' => 25, 'education' => 15, 'requirements' => 15, 'certifications' => 10],
+    // score levels: the lowest score of each; anything under 'moderate' is 'low'
+    'levels' => ['excellent' => 90, 'strong' => 80, 'good' => 70, 'moderate' => 60],
 
     'recommendations' => [
-        'strong'    => 'Strong match – interview recommended',
-        'qualified' => 'Qualified – recruiter review',
-        'review'    => 'Needs further review',
+        'excellent' => 'Excellent match',
+        'strong'    => 'Strong match',
+        'good'      => 'Good match',
+        'moderate'  => 'Moderate match',
         'low'       => 'Low match – manual review required',
     ],
 ];
