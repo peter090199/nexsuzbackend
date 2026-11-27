@@ -106,6 +106,9 @@
     Route::get('i18n/countries', [\App\Http\Controllers\System\LocalizationController::class, 'countries']);
     Route::get('i18n/translations/{locale}', [\App\Http\Controllers\System\LocalizationController::class, 'translations']);
 
+    // PDF options only (no personal data): the shared CV page below needs them without a sign-in
+    Route::get('cv/pdf-settings', [\App\Http\Controllers\CV\CvPdfSettingsController::class, 'show'])->middleware('throttle:60,1');
+
     // PUBLIC shared CV: read only, and only with the signature from the link the owner shared (see ProfileController)
     Route::get('cv/shared/{code}/{signature}', [ProfileController::class, 'sharedCv'])->whereNumber('code');
     // PUBLIC profile: only for owners who opted in to logged-out visitors
@@ -170,6 +173,9 @@
         // how job seekers provide their CV: fill up the builder, or upload a CV / resume only (master admin decides)
         Route::get('cv/mode', [\App\Http\Controllers\CV\CvModeController::class, 'show']);
         Route::put('cv/mode', [\App\Http\Controllers\CV\CvModeController::class, 'update'])->middleware('masteradmin');
+        // CV Setup (master admin): PDF preview / print / download options and the server's URLs and storage health
+        Route::put('cv/pdf-settings', [\App\Http\Controllers\CV\CvPdfSettingsController::class, 'update'])->middleware('masteradmin');
+        Route::get('cv/pdf-environment', [\App\Http\Controllers\CV\CvPdfSettingsController::class, 'environment'])->middleware('masteradmin');
 
         // Menus
         Route::Resource('menu', MenuController::class)->names('menu');
@@ -418,6 +424,12 @@
         Route::post('addQuestions', [QuestionController::class, 'addQuestions']);
         Route::get('getQuestions/{jobId}', [QuestionController::class, 'getQuestionById']);
         Route::delete('deleteQuestionById/{question_id}', [QuestionController::class, 'deleteQuestionById']);
+        // MY JOB APPLICATIONS (DEF-USERS only, own applications, read only)
+        Route::middleware('cvwriter')->prefix('my-applications')->group(function () {
+            Route::get('/', [\App\Http\Controllers\Jobs\MyApplicationsController::class, 'index']);
+            Route::get('/{id}', [\App\Http\Controllers\Jobs\MyApplicationsController::class, 'show'])->whereNumber('id');
+        });
+
         //AppliedJobs
         Route::post('saveAppliedJob', [AppliedJobController::class, 'saveAppliedJob'])->middleware('planfeature:APPLY_JOBS');
         Route::get('getAppliedJob', [AppliedJobController::class, 'getAppliedJob']);
@@ -499,6 +511,22 @@
             Route::get('/backups/{name}/download', [DatabaseAdminController::class, 'downloadBackup']);
             Route::get('/reset/preview', [DatabaseAdminController::class, 'resetPreview']);
             Route::post('/reset', [DatabaseAdminController::class, 'resetAll'])->middleware('throttle:db-reset');
+        });
+
+        // "SEE TRANSLATION" (any signed-in user; works only while an administrator has the paid plan on)
+        Route::get('translation/status', [\App\Http\Controllers\System\TranslationBillingController::class, 'status']);
+        Route::get('translation/languages', [\App\Http\Controllers\System\TranslationBillingController::class, 'languages']);
+        Route::post('translation/text', [\App\Http\Controllers\System\TranslationBillingController::class, 'text'])->middleware('throttle:30,1');
+
+        // TRANSLATION PLANS AND PRICING (DEF-ADMIN, DEF-MASTERADMIN). The API key is never returned.
+        Route::prefix('translation-billing')->middleware('subscriptionadmin')->controller(\App\Http\Controllers\System\TranslationBillingController::class)->group(function () {
+            Route::get('/', 'show');
+            Route::put('/settings', 'settings');
+            Route::put('/key', 'saveKey');
+            Route::delete('/key', 'deleteKey');
+            Route::post('/test', 'test')->middleware('throttle:10,1');
+            Route::put('/plan', 'plan');
+            Route::post('/translate', 'translate')->middleware('throttle:20,1');
         });
 
         // EMAIL CONFIG (DEF-MASTERADMIN only): dynamic SMTP settings. The password is never returned.

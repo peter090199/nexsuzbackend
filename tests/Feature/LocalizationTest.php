@@ -33,6 +33,33 @@ class LocalizationTest extends TestCase
         return $u;
     }
 
+    public function test_database_texts_are_offered_for_translation(): void
+    {
+        // only menus (InnoDB) are written: the plan tables are MyISAM, which DatabaseTransactions cannot roll back
+        \Illuminate\Support\Facades\DB::table('menus')->insert(['transNo' => 999999001, 'desc_code' => 'test', 'description' => 'Zz Test Menu',
+            'icon' => 'x', 'class' => 'x', 'routes' => 'x', 'sort' => 999, 'status' => 'A', 'created_by' => 'test']);
+        $key = 'nav_zz_test_menu';
+
+        $this->assertSame('Zz Test Menu', $this->getJson('/api/i18n/translations/en-US')->assertOk()->json("data.{$key}"));
+        $this->assertNull($this->getJson('/api/i18n/translations/fil-PH')->assertOk()->json("data.{$key}"));
+
+        $this->as('DEF-MASTERADMIN');
+        $this->putJson('/api/i18n/translations/fil-PH', ['values' => [$key => 'Bagong menu']])->assertOk();
+        $this->assertSame('Bagong menu', $this->getJson('/api/i18n/translations/fil-PH')->json("data.{$key}"));
+    }
+
+    public function test_automatic_forgets_the_saved_language_but_keeps_the_country(): void
+    {
+        $this->as('DEF-ADMIN');
+        $this->putJson('/api/i18n/preference', ['country' => 'JP'])->assertOk();
+        $this->putJson('/api/i18n/preference', ['language' => 'fil-PH'])->assertOk();
+        $this->putJson('/api/i18n/preference', ['language' => 'auto'])->assertOk();
+        $this->getJson('/api/i18n/preference')->assertJsonPath('language', null)->assertJsonPath('country', 'JP');
+
+        $this->putJson('/api/i18n/preference', ['country' => 'auto'])->assertOk();
+        $this->getJson('/api/i18n/preference')->assertJsonPath('country', null);
+    }
+
     public function test_reference_data_is_complete_and_keeps_countries_and_languages_separate(): void
     {
         $this->as('DEF-MASTERADMIN');
@@ -63,10 +90,10 @@ class LocalizationTest extends TestCase
     public function test_activating_defaulting_and_adding_languages(): void
     {
         $this->as('DEF-MASTERADMIN');
-        $this->putJson('/api/i18n/languages/ar', ['is_default' => true])->assertStatus(422);            // not active yet
-        $this->putJson('/api/i18n/languages/ar', ['active' => true])->assertOk();
-        $this->putJson('/api/i18n/languages/ar', ['is_default' => true])->assertOk();
-        $this->putJson('/api/i18n/languages/ar', ['active' => false])->assertStatus(422);              // it is the default
+        $this->putJson('/api/i18n/languages/he', ['is_default' => true])->assertStatus(422);            // not active yet
+        $this->putJson('/api/i18n/languages/he', ['active' => true])->assertOk();
+        $this->putJson('/api/i18n/languages/he', ['is_default' => true])->assertOk();
+        $this->putJson('/api/i18n/languages/he', ['active' => false])->assertStatus(422);              // it is the default
         $this->putJson('/api/i18n/languages/en-US', ['active' => false])->assertStatus(422);           // the fallback
 
         $this->postJson('/api/i18n/languages', ['code' => 'ceb-PH', 'name' => 'Cebuano (Philippines)', 'native' => 'Cebuano', 'rtl' => false, 'countries' => ['PH']])->assertOk();
@@ -74,7 +101,7 @@ class LocalizationTest extends TestCase
         $this->putJson('/api/i18n/countries/PH', ['active' => false])->assertOk();
 
         $this->as(null);
-        $config = $this->getJson('/api/i18n/config')->assertOk()->assertJsonPath('default', 'ar');
+        $config = $this->getJson('/api/i18n/config')->assertOk()->assertJsonPath('default', 'he');
         $this->assertContains('ceb-PH', array_column($config->json('languages'), 'code'));
     }
 
@@ -101,7 +128,7 @@ class LocalizationTest extends TestCase
         $this->as('DEF-MASTERADMIN');
         $this->putJson("/api/i18n/users/{$a->id}", ['language' => 'zh-CN'])->assertOk();
         $this->putJson("/api/i18n/users/{$b->id}", ['language' => 'fil-PH'])->assertOk();
-        $this->putJson("/api/i18n/users/{$b->id}", ['language' => 'de'])->assertStatus(422);        // not activated
+        $this->putJson("/api/i18n/users/{$b->id}", ['language' => 'da'])->assertStatus(422);        // not activated
         $list = $this->getJson('/api/i18n/users?search=' . urlencode($a->email))->assertOk()->json('data');
         $this->assertSame([[$a->id, 'zh-CN']], array_map(fn ($u) => [$u['id'], $u['language']], $list));
 
@@ -138,7 +165,7 @@ class LocalizationTest extends TestCase
     public function test_each_user_keeps_their_own_language(): void
     {
         $a = $this->as('DEF-CLIENT');
-        $this->putJson('/api/i18n/preference', ['language' => 'de'])->assertStatus(422);               // not activated
+        $this->putJson('/api/i18n/preference', ['language' => 'da'])->assertStatus(422);               // not activated
         $this->putJson('/api/i18n/preference', ['language' => 'fil-PH'])->assertOk();
         $this->as('DEF-USERS');
         $this->getJson('/api/i18n/preference')->assertOk()->assertJsonPath('language', null);

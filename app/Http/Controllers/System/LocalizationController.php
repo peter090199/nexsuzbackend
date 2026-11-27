@@ -7,6 +7,7 @@ use App\Models\AppSetting;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Countries, languages, translations and each user's language. Countries and languages are separate lists.
@@ -22,7 +23,8 @@ use Illuminate\Support\Facades\Auth;
  */
 class LocalizationController extends Controller
 {
-    private const BUILT_IN_ACTIVE = ['en-US', 'fil-PH', 'zh-CN'];
+    private const BUILT_IN_ACTIVE = ['en-US', 'fil-PH', 'zh-CN', 'ja', 'ko', 'es', 'ar', 'vi', 'th',
+        'de', 'fr', 'hi', 'it', 'nl', 'pl', 'pt', 'ru', 'sv', 'tr', 'zh-TW', 'zh-HK'];
     private const FALLBACK = 'en-US';
     private const LOCALE = '/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/';
 
@@ -70,7 +72,8 @@ class LocalizationController extends Controller
     {
         return response()->json(['success' => true, 'default' => $this->languageState()['default'],
             'languages' => collect($this->languages())->where('active', true)
-                ->map(fn ($l) => ['code' => $l['code'], 'name' => $l['name'], 'native' => $l['native'] ?? '', 'rtl' => (bool) ($l['rtl'] ?? false)])->values()]);
+                ->map(fn ($l) => ['code' => $l['code'], 'name' => $l['name'], 'native' => $l['native'] ?? '', 'rtl' => (bool) ($l['rtl'] ?? false),
+                    'countries' => $l['countries'] ?? []])->values()]);
     }
 
     /** GET i18n/countries : the active countries, for the country picker */
@@ -78,9 +81,46 @@ class LocalizationController extends Controller
     {
         $inactive = AppSetting::read('i18n.countries')['inactive'] ?? [];
 
+        $english = collect(self::reference('languages'))->firstWhere('code', 'en')['countries'] ?? [];
+
         return response()->json(['success' => true, 'data' => collect(self::reference('countries'))
             ->reject(fn ($c) => in_array($c['code'], $inactive, true))
-            ->map(fn ($c) => ['code' => $c['code'], 'code3' => $c['code3'], 'name' => $c['name']])->values()]);
+            ->map(fn ($c) => ['code' => $c['code'], 'code3' => $c['code3'], 'name' => $c['name'], 'dial' => $c['dial'],
+                'english' => in_array($c['code'], $english, true)])->values()]);
+    }
+
+    /**
+     * Texts administrators typed into the database (plans, plan features, menus), as extra English entries. They
+     * then appear in Language Setup to be translated, without any code change. Plan names are product names.
+     */
+    private function contentTexts(): array
+    {
+        $texts = [];
+        $add = function (?string $text, ?string $key = null) use (&$texts) {
+            $text = trim(preg_replace('/\s+/u', ' ', (string) $text));
+            if ($text === '') { return; }
+            // the key follows the wording: a reworded text needs a new translation
+            $texts[$key ?? 'web_db_' . substr(md5($text), 0, 12)] = $text;
+        };
+
+        $plans = DB::table('userplanheader')->where('recordStatus', 'active')->get(['planId', 'tag', 'description']);
+        foreach ($plans as $plan) {
+            $add($plan->tag);
+            $add($plan->description);
+        }
+        DB::table('userplandetails')->whereIn('planId', $plans->pluck('planId'))
+            ->where(fn ($q) => $q->whereNull('recordStatus')->orWhere('recordStatus', '!=', 'inactive'))
+            ->pluck('feature_name')->each(fn ($name) => $add($name));
+
+        // menus use the same keys the navigation already looks up (see menu-label.pipe.ts)
+        foreach (['menus', 'submenus'] as $table) {
+            foreach (DB::table($table)->pluck('description') as $label) {
+                $slug = trim(preg_replace('/[^a-z0-9]+/', '_', strtolower((string) $label)), '_');
+                if ($slug !== '') { $add($label, "nav_{$slug}"); }
+            }
+        }
+
+        return $texts;
     }
 
     /** GET i18n/translations/{locale} : the administrator's texts for one language */
@@ -89,7 +129,8 @@ class LocalizationController extends Controller
         if (!preg_match(self::LOCALE, $locale)) { return $this->fail('Unknown language.', 404); }
 
         // base language first, the country variant on top
-        $text = [];
+        // English also lists the database texts; anything an administrator saved wins over them
+        $text = $locale === self::FALLBACK ? $this->contentTexts() : [];
         foreach (array_unique([explode('-', $locale)[0], $locale]) as $code) {
             $text = array_merge($text, AppSetting::read("i18n.text.{$code}") ?: []);
         }
@@ -114,12 +155,17 @@ class LocalizationController extends Controller
         // language and country are separate choices: either one may be saved on its own
         $v = $request->validate([
             'language' => 'required_without:country|string|max:20',
-            'country' => 'required_without:language|string|in:' . implode(',', array_column(self::reference('countries'), 'code')),
+            'country' => 'required_without:language|string|in:auto,' . implode(',', array_column(self::reference('countries'), 'code')),
         ]);
-        if (isset($v['language']) && !$this->activeLanguage($v['language'])) { return $this->fail('That language is not available.'); }
+        // "auto" forgets the saved language, so it is detected from the browser again
+        $auto = ($v['language'] ?? null) === 'auto';
+        if (!$auto && isset($v['language']) && !$this->activeLanguage($v['language'])) { return $this->fail('That language is not available.'); }
         $key = 'i18n.user.' . Auth::id();
         $saved = array_merge(AppSetting::read($key) ?: [], $v);
-        AppSetting::write($key, $saved);
+        if ($auto) { unset($saved['language']); }
+        // "auto" for the country too: it is detected from the device again
+        if (($v['country'] ?? null) === 'auto') { unset($saved['country']); }
+        $saved ? AppSetting::write($key, $saved) : AppSetting::forget($key);
 
         return response()->json(['success' => true] + $saved);
     }
