@@ -1,7 +1,6 @@
 <?php
 
 namespace App\Http\Controllers\Postreaction;
-
 use App\Helpers\PostVisibility;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
