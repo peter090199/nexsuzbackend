@@ -100,6 +100,8 @@
     // PUBLIC website: Contact section data (only what the display switches allow) and the contact form
     Route::get('business-info/public', [\App\Http\Controllers\System\BusinessInfoController::class, 'publicShow']);
     Route::post('contact-message', [\App\Http\Controllers\System\BusinessInfoController::class, 'contact'])->middleware('throttle:contact-message');
+    // PUBLIC website: About section totals (three counts only, cached 10 minutes)
+    Route::get('public/stats', [\App\Http\Controllers\System\PublicStatsController::class, 'show'])->middleware('throttle:60,1');
 
     // PUBLIC language data: the picker and the texts are needed before anyone signs in
     Route::get('i18n/config', [\App\Http\Controllers\System\LocalizationController::class, 'config']);
